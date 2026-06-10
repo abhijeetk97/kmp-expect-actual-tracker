@@ -1,19 +1,31 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>org.jetbrains.plugins.template</id>
-    <name>IntelliJ Platform Plugin Template</name>
-    <vendor>JetBrains</vendor>
+    <id>io.github.abhijeetk97.kmpexpectactual</id>
+    <name>KMP Expect/Actual Tracker</name>
+    <vendor url="https://github.com/abhijeetk97">abhijeetk97</vendor>
+
     <description><![CDATA[
-        <p><b>IntelliJ Platform Plugin Template</b> is a repository that provides a pure template to make it easier to create a new plugin project.</p>
-        <p>The main goal of this template is to speed up the setup phase of plugin development for both new and experienced developers by preconfiguring the project scaffold and CI, linking to the proper documentation pages, and keeping everything organized.</p>
+        A project-wide coverage dashboard for Kotlin Multiplatform expect/actual
+        declarations. Lists every expect and shows which targets supply an actual,
+        flagging incomplete declarations.
     ]]></description>
 
+    <!-- Required: platform + the Kotlin plugin -->
     <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.kotlin</depends>
 
-    <resource-bundle>messages.MyBundle</resource-bundle>
+    <!-- Declare K2 compatibility. Our v1 uses only syntactic PSI, so it works in
+         both K1 and K2. Without this, the plugin won't load under K2 (default since 2025.3). -->
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK1="true" supportsK2="true" />
+    </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="org.jetbrains.plugins.template.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="org.jetbrains.plugins.template.startup.MyProjectActivity" />
+        <toolWindow
+            id="Expect/Actual"
+            anchor="right"
+            factoryClass="io.github.abhijeetk97.kmpexpectactual.ExpectActualToolWindowFactory"
+            icon="AllIcons.Toolwindows.ToolWindowStructure" />
     </extensions>
+
 </idea-plugin>
