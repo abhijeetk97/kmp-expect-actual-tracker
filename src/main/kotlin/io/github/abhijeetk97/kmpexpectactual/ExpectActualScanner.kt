@@ -123,9 +123,14 @@ object ExpectActualScanner {
             GlobalSearchScope.projectScope(project),
         )
 
-        LOG.info("KMP Scanner: found ${ktFiles.size} Kotlin files in project scope")
+        LOG.info("KMP Scanner: scanning ${ktFiles.size} Kotlin source files")
 
         for (vf in ktFiles) {
+            // Skip files under any directory named "generated" — Compose Multiplatform and
+            // other code-gen tools produce `expect` declarations there (e.g. Res accessors)
+            // that are implementation details, not user-authored declarations.
+            if (vf.path.contains("/generated/")) continue
+
             // VirtualFile is the platform's filesystem abstraction. It doesn't give us
             // the parsed tree; we need PsiManager to convert it to a KtFile (the PSI).
             // The `as? KtFile` cast can return null if the file isn't actually Kotlin
@@ -173,6 +178,7 @@ object ExpectActualScanner {
         )
 
         for (vf in ktFiles) {
+            if (vf.path.contains("/generated/")) continue
             val ktFile = psiManager.findFile(vf) as? KtFile ?: continue
             collectActuals(ktFile.declarations, pointerManager, result)
         }
