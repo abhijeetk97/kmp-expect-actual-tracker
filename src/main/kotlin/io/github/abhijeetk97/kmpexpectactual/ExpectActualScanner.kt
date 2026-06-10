@@ -1,5 +1,6 @@
 package io.github.abhijeetk97.kmpexpectactual
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.project.Project
@@ -55,6 +56,8 @@ import org.jetbrains.kotlin.psi.KtProperty
  * Kotlin Analysis API (stretch goal, issue #14) would resolve this precisely.
  */
 object ExpectActualScanner {
+
+    private val LOG = Logger.getInstance(ExpectActualScanner::class.java)
 
     // ─────────────────────────────────────────────────────────────────────────
     // PUBLIC API
@@ -120,6 +123,8 @@ object ExpectActualScanner {
             GlobalSearchScope.projectScope(project),
         )
 
+        LOG.info("KMP Scanner: found ${ktFiles.size} Kotlin files in project scope")
+
         for (vf in ktFiles) {
             // VirtualFile is the platform's filesystem abstraction. It doesn't give us
             // the parsed tree; we need PsiManager to convert it to a KtFile (the PSI).
@@ -128,6 +133,8 @@ object ExpectActualScanner {
             val ktFile = psiManager.findFile(vf) as? KtFile ?: continue
             collectExpects(ktFile.declarations, pointerManager, result)
         }
+
+        LOG.info("KMP Scanner: found ${result.size} expect declarations")
         return result
     }
 

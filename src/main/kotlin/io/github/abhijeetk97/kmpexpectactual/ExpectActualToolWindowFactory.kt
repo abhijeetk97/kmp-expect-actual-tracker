@@ -7,6 +7,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -210,7 +211,25 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // -------------------------------------------------------------------------
         // 6. KICK OFF THE INITIAL SCAN
         // -------------------------------------------------------------------------
-        refresh(project, root, model)
+        // WHY DumbService.runWhenSmart instead of just calling refresh() directly:
+        //
+        // On project open the IDE goes through several phases:
+        //   1. Project model loaded → smart mode declared briefly
+        //   2. VFS refresh runs → 100s of file roots are mounted into memory
+        //   3. VFS refresh triggers re-indexing → dumb mode again
+        //   4. Indexing completes → smart mode, this time for real
+        //
+        // If we call refresh() immediately, our ReadAction.nonBlocking().inSmartMode()
+        // fires during window (1) — before the VFS has any files. FileTypeIndex returns
+        // 0 Kotlin files and we display "No expect declarations found."
+        //
+        // DumbService.runWhenSmart defers execution until smart mode is stable. More
+        // importantly, it re-runs the callback every time the project re-enters smart
+        // mode — so it naturally catches window (4) even if (1) fires first.
+        //
+        // The Refresh button bypasses this and calls refresh() directly, which is fine
+        // because by the time the user can click it the project is fully loaded.
+        DumbService.getInstance(project).runWhenSmart { refresh(project, root, model) }
 
         // -------------------------------------------------------------------------
         // 7. ADD THE PANEL TO THE TOOL WINDOW
