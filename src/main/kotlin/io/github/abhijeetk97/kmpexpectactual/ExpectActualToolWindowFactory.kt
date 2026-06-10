@@ -5,6 +5,7 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.DumbService
@@ -12,18 +13,46 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.psi.NavigatablePsiElement
+import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.JBColor
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.concurrency.AppExecutorUtil
 import java.awt.BorderLayout
+import java.awt.Color
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.JPanel
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreePath
+
+/**
+ * UI-only data class representing a single platform row under an expect node.
+ *
+ * WHY IT'S SEPARATE FROM Coverage
+ * ---------------------------------
+ * Coverage holds the full analytical model (FqNames, all actuals, known platforms).
+ * PlatformNode is just enough data to paint one row in the tree:
+ *   - which platform this row is for
+ *   - a pointer to jump to the `actual` on double-click (null if the actual is missing)
+ *
+ * Keeping this UI-only avoids coupling the renderer to Coverage internals, and makes
+ * the renderer's `when (obj)` dispatch clean: Coverage = parent row, PlatformNode = child row.
+ */
+data class PlatformNode(
+    val platform: String,
+    // Non-null when this platform has a matching `actual` declaration.
+    // Null when the platform is "missing" — i.e., no actual was found.
+    // Stored as a SmartPsiElementPointer for the same reason as ExpectEntry.pointer:
+    // it stays valid even after the user edits the file.
+    val pointer: SmartPsiElementPointer<*>?,
+) {
+    val isCovered: Boolean get() = pointer != null
+}
 
 /**
  * Builds and populates the "Expect/Actual" tool window panel.
@@ -64,32 +93,35 @@ import javax.swing.tree.DefaultTreeModel
  * LAYOUT STRUCTURE
  * ----------------
  *   JPanel (BorderLayout)
- *   ├─ NORTH:  ActionToolbar  ← Refresh button lives here
+ *   ├─ NORTH: ActionToolbar  ← Refresh + "Show incomplete only" filter
  *   └─ CENTER: JBScrollPane
- *                └─ Tree      ← expect declarations listed here
+ *                └─ Tree
+ *                     ├─ Coverage (parent) — "platformName()  [2/3 platforms]"
+ *                     │    ├─ PlatformNode — "Android  ✓"
+ *                     │    ├─ PlatformNode — "iOS  ✓"
+ *                     │    └─ PlatformNode — "JVM  ✗ missing"   ← red
+ *                     └─ Coverage (parent) — "UserAgent  [1/2 platforms]"  ← red name
+ *                          ├─ PlatformNode — "Android  ✓"
+ *                          └─ PlatformNode — "iOS  ✗ missing"
+ *
+ * MUTABLE STATE IN LOCAL FUNCTIONS
+ * ----------------------------------
+ * All state for this tool window instance (the coverage list and filter flag) is held
+ * as local `var` variables inside createToolWindowContent(). The local helper functions
+ * (applyToTree, refresh) and the action lambdas all capture those vars as closures.
+ *
+ * This is intentional: ToolWindowFactory is a singleton shared across all open projects.
+ * Putting state in instance fields would mean two simultaneously open projects would
+ * share (and corrupt) each other's coverage data. Local vars in createToolWindowContent
+ * are created fresh for each project window, so each project gets its own independent state.
  */
 class ExpectActualToolWindowFactory : ToolWindowFactory {
 
-    /**
-     * Called once by the platform when the tool window is first opened.
-     * Everything set up here lives for the lifetime of the open project.
-     *
-     * [project] — the currently open project. Almost every IntelliJ API is
-     *             reached through a Project instance.
-     * [toolWindow] — the container we're filling. We add our Swing panel to it
-     *                via its ContentManager.
-     */
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
 
-        // -------------------------------------------------------------------------
-        // 1. BUILD THE SWING TREE
-        // -------------------------------------------------------------------------
-        // IntelliJ's plugin UI is plain Swing (with some JetBrains wrapper components
-        // prefixed "JB" that handle dark/light themes correctly).
-        //
-        // DefaultMutableTreeNode / DefaultTreeModel are standard Swing. The "root" node
-        // is never shown directly (isRootVisible = false by default in Tree), but it
-        // holds all the leaf nodes we'll add for each ExpectEntry.
+        // ─────────────────────────────────────────────────────────────────────────
+        // 1. TREE SETUP
+        // ─────────────────────────────────────────────────────────────────────────
         val root = DefaultMutableTreeNode("Expect declarations")
         val model = DefaultTreeModel(root)
 
@@ -97,15 +129,106 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // It respects the IDE theme and keyboard shortcuts. Prefer it over raw JTree.
         val tree = Tree(model)
 
-        // -------------------------------------------------------------------------
-        // 2. CUSTOM RENDERER — controls how each row looks
-        // -------------------------------------------------------------------------
-        // By default, Tree calls toString() on the node's userObject. We override
-        // that with a ColoredTreeCellRenderer so we can paint each part of the label
-        // in a different colour/style.
+        // ─────────────────────────────────────────────────────────────────────────
+        // 2. MUTABLE STATE — captured by local functions below
+        // ─────────────────────────────────────────────────────────────────────────
+        // The last coverage list fetched from CoverageService. Starts empty; populated
+        // by the first refresh() call. Retained so the filter can re-render without
+        // re-scanning when the user toggles "show incomplete only".
+        var coverageList: List<Coverage> = emptyList()
+
+        // Whether the "show incomplete only" filter is currently active.
+        var showIncompleteOnly = false
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // 3. applyToTree() — rebuild the tree from the current coverageList + filter
+        // ─────────────────────────────────────────────────────────────────────────
+        // This is a LOCAL FUNCTION (a Kotlin feature: a function defined inside another
+        // function). It captures `coverageList`, `showIncompleteOnly`, `root`, `model`,
+        // and `tree` from the enclosing scope.
         //
-        // customizeCellRenderer is called for EVERY visible row every time the tree
-        // repaints. Keep it fast — no PSI access, no IO, just append() calls.
+        // Separating this from refresh() is the key to the "filter without re-scan"
+        // behaviour: refresh() fetches data and updates `coverageList`, then calls
+        // applyToTree(). The filter toggle action only calls applyToTree() — no fetch.
+        fun applyToTree() {
+            val toShow = if (showIncompleteOnly) {
+                coverageList.filter { !it.isComplete }
+            } else {
+                coverageList
+            }
+
+            root.removeAllChildren()
+            root.userObject = when {
+                coverageList.isEmpty() -> "No expect declarations found"
+                toShow.isEmpty()       -> "All expects are fully covered 🎉"
+                else                   -> "Expect declarations"
+            }
+
+            toShow.sortedBy { it.expect.fqName.asString() }.forEach { coverage ->
+                val parentNode = DefaultMutableTreeNode(coverage)
+
+                // Add one child row per known platform, sorted alphabetically so the
+                // order is stable and easy to scan visually.
+                coverage.knownPlatforms.sorted().forEach { platform ->
+                    // Look up whether this platform has a matching `actual`.
+                    // actualsByPlatform[platform] is non-null iff an actual was found.
+                    val ptr = coverage.actualsByPlatform[platform]
+                    parentNode.add(DefaultMutableTreeNode(PlatformNode(platform, ptr)))
+                }
+
+                root.add(parentNode)
+            }
+
+            model.reload()
+
+            // Expand all parent (Coverage) rows so the user immediately sees the
+            // platform children without having to click each one open.
+            // We walk forward while rowCount grows: expandRow(i) makes child rows
+            // visible, increasing rowCount, so the loop naturally expands everything.
+            var i = 0
+            while (i < tree.rowCount) {
+                tree.expandRow(i)
+                i++
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // 4. refresh() — fetch from cache (or re-scan) then apply to tree
+        // ─────────────────────────────────────────────────────────────────────────
+        fun refresh() {
+            root.removeAllChildren()
+            root.userObject = "Scanning…"
+            model.reload()
+
+            // Ask the service for coverage data. CoverageService returns the cached
+            // list if available, or runs the full scanner on first call / after invalidate().
+            // Either way this is PSI work, so it must stay inside a read action.
+            ReadAction.nonBlocking<List<Coverage>> {
+                CoverageService.getInstance(project).getCoverage()
+            }
+                .inSmartMode(project)
+                .expireWith(project)
+                .finishOnUiThread(ModalityState.defaultModalityState()) { list ->
+                    // Back on the EDT — safe to touch Swing state.
+                    coverageList = list
+                    applyToTree()
+                }
+                .submit(AppExecutorUtil.getAppExecutorService())
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // 5. RENDERER — controls how each row looks
+        // ─────────────────────────────────────────────────────────────────────────
+        // customizeCellRenderer is called for EVERY visible row on EVERY repaint.
+        // Keep it fast: no PSI access, no IO, just append() calls.
+        //
+        // COVERED_ATTRS: a muted green that reads well in both light and dark themes.
+        //   JBColor(lightThemeColor, darkThemeColor) — the platform picks the right one.
+        val coveredAttrs = SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_PLAIN,
+            JBColor(Color(0, 128, 0), Color(98, 150, 85)),
+        )
+
         tree.cellRenderer = object : ColoredTreeCellRenderer() {
             override fun customizeCellRenderer(
                 tree: JTree,
@@ -117,190 +240,162 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
                 hasFocus: Boolean,
             ) {
                 val node = value as? DefaultMutableTreeNode ?: return
+
                 when (val obj = node.userObject) {
+
+                    // ── PARENT ROW: one expect declaration ──────────────────────
                     is Coverage -> {
-                        // Unwrap the ExpectEntry from the Coverage wrapper for display.
-                        // Issue #4 will extend this branch to also show per-platform nodes.
                         val e = obj.expect
-                        // SimpleTextAttributes controls colour and style (bold, italic, strikethrough).
-                        // GRAYED = dim grey, REGULAR = normal foreground colour.
+
+                        // [kind] badge in dim grey
                         append("[${e.kind}] ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                        append(e.displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
-                        // The package name in small grey after the declaration name.
+
+                        // Declaration name: red if any platform is missing, normal otherwise.
+                        // ERROR_ATTRIBUTES is the platform's standard "problem" colour — it
+                        // automatically adapts to dark/light theme and editor colour schemes.
+                        val nameAttrs = if (obj.isComplete) {
+                            SimpleTextAttributes.REGULAR_ATTRIBUTES
+                        } else {
+                            SimpleTextAttributes.ERROR_ATTRIBUTES
+                        }
+                        append(e.displayName, nameAttrs)
+
+                        // Package path in small grey after the name
                         append("  ${e.fqName.parent().asString()}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+
+                        // Coverage badge: "  [2/3 platforms]" — always grey regardless of
+                        // completeness (the red name already draws attention to problems).
+                        // Only shown when there are known platforms; hides for expect-only
+                        // declarations with no actuals anywhere yet.
+                        if (obj.knownPlatforms.isNotEmpty()) {
+                            append("  [${obj.coverageSummary}]", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                        }
                     }
-                    // Root / placeholder nodes just show their string label.
+
+                    // ── CHILD ROW: one platform under an expect ──────────────────
+                    is PlatformNode -> {
+                        append(obj.platform, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                        if (obj.isCovered) {
+                            // ✓ in green — the actual exists
+                            append("  ✓", coveredAttrs)
+                        } else {
+                            // ✗ missing in red — no actual for this platform
+                            append("  ✗ missing", SimpleTextAttributes.ERROR_ATTRIBUTES)
+                        }
+                    }
+
+                    // ── ROOT / PLACEHOLDER strings ────────────────────────────────
                     else -> append(obj.toString(), SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
             }
         }
 
-        // -------------------------------------------------------------------------
-        // 3. NAVIGATION ON DOUBLE-CLICK
-        // -------------------------------------------------------------------------
+        // ─────────────────────────────────────────────────────────────────────────
+        // 6. NAVIGATION ON DOUBLE-CLICK
+        // ─────────────────────────────────────────────────────────────────────────
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 2) return
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
-                // Tree nodes now hold Coverage objects; unwrap to reach the ExpectEntry.
-                val entry = (node.userObject as? Coverage)?.expect ?: return
 
-                // We need the live PsiElement to navigate. But reading PSI outside a
-                // read action throws an exception. ReadAction.nonBlocking runs the
-                // lambda on a background thread with the read lock held, then hands
-                // the result back to the EDT in finishOnUiThread().
+                // Determine which pointer to navigate to based on node type:
+                //   Coverage (parent) → jump to the `expect` declaration
+                //   PlatformNode (child, covered) → jump to the `actual` declaration
+                //   PlatformNode (child, missing) → nothing to navigate to
+                val pointer: SmartPsiElementPointer<*>? = when (val obj = node.userObject) {
+                    is Coverage    -> obj.expect.pointer
+                    is PlatformNode -> obj.pointer  // null if missing — handled below
+                    else           -> null
+                }
+                pointer ?: return
+
+                // Reading PSI must happen inside a read action (even just dereferencing
+                // the pointer). nonBlocking keeps us off the EDT during the read.
                 ReadAction.nonBlocking<NavigatablePsiElement?> {
-                    // Dereference the smart pointer here, safely inside the read action.
-                    // .element returns null if the declaration was deleted since we scanned.
-                    entry.pointer.element as? NavigatablePsiElement
+                    pointer.element as? NavigatablePsiElement
                 }.finishOnUiThread(ModalityState.defaultModalityState()) { el ->
-                    // navigate(true) opens the file in the editor and moves the caret
-                    // to this declaration. The `true` means "request focus" (bring the
-                    // editor to front).
+                    // navigate(true) opens the file and moves the caret to the declaration.
+                    // `true` = request focus (bring editor to front).
                     el?.navigate(true)
                 }.submit(AppExecutorUtil.getAppExecutorService())
             }
         })
 
-        // -------------------------------------------------------------------------
-        // 4. TOOLBAR — Refresh button
-        // -------------------------------------------------------------------------
-        // IntelliJ actions (AnAction) are the platform's way of representing any
-        // user-triggered operation — menu items, toolbar buttons, keyboard shortcuts
-        // all go through the same AnAction system.
-        //
-        // Here we create an anonymous AnAction inline. The three constructor arguments
-        // are: display text, description (shown in the status bar on hover), and icon.
-        // AllIcons is the platform's built-in icon library — no image files needed.
-        //
-        // The lambda captures `project`, `root`, and `model` from the enclosing scope,
-        // so when the button is clicked it has everything it needs to re-run the scan.
-        val refreshAction = object : AnAction("Refresh", "Re-scan the project for expect declarations", AllIcons.Actions.Refresh) {
+        // ─────────────────────────────────────────────────────────────────────────
+        // 7. TOOLBAR ACTIONS
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // ── Refresh ──────────────────────────────────────────────────────────────
+        val refreshAction = object : AnAction(
+            "Refresh",
+            "Invalidate cache and re-scan the project for expect declarations",
+            AllIcons.Actions.Refresh,
+        ) {
             override fun actionPerformed(e: AnActionEvent) {
-                // Invalidate the cache first so getCoverage() re-scans the project
-                // rather than returning the stale cached result.
+                // Drop the cached coverage so getCoverage() runs the scanner again.
                 CoverageService.getInstance(project).invalidate()
-                refresh(project, root, model)
+                refresh()
+            }
+        }
+
+        // ── "Show incomplete only" filter toggle ──────────────────────────────────
+        // ToggleAction is IntelliJ's built-in action for a two-state (on/off) toolbar
+        // button. The platform automatically renders it with a "pressed" visual state
+        // when isSelected() returns true — no extra UI code needed.
+        //
+        // isSelected() is called by the platform on every toolbar repaint to decide
+        // whether to draw the button as pressed/highlighted. Keep it fast.
+        //
+        // setSelected() is called when the user clicks the button. We flip the flag
+        // and call applyToTree() — which re-renders from the already-loaded coverageList
+        // without triggering a new background scan. This is the "filter without re-scan"
+        // behaviour described in the issue.
+        val filterAction = object : ToggleAction(
+            "Show incomplete only",
+            "Hide expects that are fully covered on all platforms",
+            AllIcons.General.Filter,
+        ) {
+            override fun isSelected(e: AnActionEvent): Boolean = showIncompleteOnly
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                showIncompleteOnly = state
+                applyToTree()
             }
         }
 
         // DefaultActionGroup is a container for one or more AnActions. The toolbar
-        // renders each action in the group as a button.
-        val actionGroup = DefaultActionGroup(refreshAction)
-
-        // ActionManager is the platform singleton that owns all registered actions and
-        // creates toolbars. The string "ExpectActualToolbar" is an ID used internally
-        // by the platform for things like shortcut customisation — it just needs to be
-        // unique, it doesn't appear in any UI.
-        //
-        // The boolean `true` = horizontal toolbar (false = vertical).
-        val toolbar = ActionManager.getInstance()
-            .createActionToolbar("ExpectActualToolbar", actionGroup, true)
-
-        // targetComponent tells the toolbar which component's DataContext to use when
-        // building AnActionEvents. Without this the toolbar logs a warning and some
-        // context-sensitive actions won't work correctly.
+        // renders each action as a button in the order they appear in the group.
+        val toolbar = ActionManager.getInstance().createActionToolbar(
+            "ExpectActualToolbar",
+            DefaultActionGroup(refreshAction, filterAction),
+            true, // true = horizontal toolbar
+        )
         toolbar.targetComponent = tree
 
-        // -------------------------------------------------------------------------
-        // 5. ASSEMBLE THE PANEL
-        // -------------------------------------------------------------------------
-        // BorderLayout divides a container into 5 zones: NORTH, SOUTH, EAST, WEST,
-        // CENTER. CENTER expands to fill all remaining space — which is what we want
-        // for the tree. NORTH stays at its natural height — which is what we want for
-        // the toolbar strip.
+        // ─────────────────────────────────────────────────────────────────────────
+        // 8. PANEL ASSEMBLY
+        // ─────────────────────────────────────────────────────────────────────────
+        // BorderLayout divides a container into 5 zones. CENTER expands to fill all
+        // remaining space (the tree). NORTH stays at its natural height (toolbar strip).
         val panel = JPanel(BorderLayout()).apply {
             add(toolbar.component, BorderLayout.NORTH)
             add(JBScrollPane(tree), BorderLayout.CENTER)
         }
 
-        // -------------------------------------------------------------------------
-        // 6. KICK OFF THE INITIAL SCAN
-        // -------------------------------------------------------------------------
-        // WHY DumbService.runWhenSmart instead of just calling refresh() directly:
-        //
-        // On project open the IDE goes through several phases:
-        //   1. Project model loaded → smart mode declared briefly
-        //   2. VFS refresh runs → 100s of file roots are mounted into memory
-        //   3. VFS refresh triggers re-indexing → dumb mode again
-        //   4. Indexing completes → smart mode, this time for real
-        //
-        // If we call refresh() immediately, our ReadAction.nonBlocking().inSmartMode()
-        // fires during window (1) — before the VFS has any files. FileTypeIndex returns
-        // 0 Kotlin files and we display "No expect declarations found."
-        //
-        // DumbService.runWhenSmart defers execution until smart mode is stable. More
-        // importantly, it re-runs the callback every time the project re-enters smart
-        // mode — so it naturally catches window (4) even if (1) fires first.
-        //
-        // The Refresh button bypasses this and calls refresh() directly, which is fine
-        // because by the time the user can click it the project is fully loaded.
-        DumbService.getInstance(project).runWhenSmart { refresh(project, root, model) }
+        // ─────────────────────────────────────────────────────────────────────────
+        // 9. INITIAL SCAN
+        // ─────────────────────────────────────────────────────────────────────────
+        // DumbService.runWhenSmart defers the first scan until the IDE has finished
+        // indexing. Without this, FileTypeIndex returns 0 files and the tree shows
+        // "No expect declarations found" permanently.
+        // See the long comment in the previous commit for full details on the timing.
+        DumbService.getInstance(project).runWhenSmart { refresh() }
 
-        // -------------------------------------------------------------------------
-        // 7. ADD THE PANEL TO THE TOOL WINDOW
-        // -------------------------------------------------------------------------
-        // ContentManager manages the tab(s) inside the tool window strip.
-        // We create a single unnamed tab (null title) containing our whole panel.
-        val content = toolWindow.contentManager.factory
-            .createContent(panel, null, false)
-        toolWindow.contentManager.addContent(content)
-    }
-
-    /**
-     * Runs the scanner on a background thread and updates the tree on the EDT.
-     * Called both on initial open and when the Refresh button is clicked.
-     *
-     * BREAKDOWN OF THE READ ACTION CHAIN
-     * -----------------------------------
-     * ReadAction.nonBlocking { ... }
-     *   — declares that the lambda needs the PSI read lock and returns a result.
-     *   — returns a NonBlockingReadAction builder; nothing runs yet.
-     *
-     * .inSmartMode(project)
-     *   — "don't start until indexing is finished". The platform builds indexes of
-     *     all project files (classes, symbols, file types) on startup and after
-     *     changes. FileTypeIndex and other APIs only work reliably after indexing.
-     *     Without this, we'd scan during indexing and find 0 files every time.
-     *
-     * .expireWith(project)
-     *   — if the project is closed while we're scanning, cancel the action silently.
-     *     Without this we'd crash trying to use a disposed Project object.
-     *
-     * .finishOnUiThread(ModalityState.defaultModalityState()) { result -> ... }
-     *   — once the background lambda completes, run THIS lambda on the EDT with the
-     *     result. This is where we're allowed to touch Swing.
-     *   — ModalityState.defaultModalityState() means "run even if a dialog is open",
-     *     which is the correct default for non-blocking refreshes.
-     *
-     * .submit(AppExecutorUtil.getAppExecutorService())
-     *   — actually schedules the work on the platform's shared thread pool. This is
-     *     the call that starts everything running.
-     */
-    private fun refresh(project: Project, root: DefaultMutableTreeNode, model: DefaultTreeModel) {
-        // Show a placeholder immediately on the EDT before the background scan starts.
-        root.removeAllChildren()
-        root.userObject = "Scanning…"
-        model.reload() // reload() tells the JTree the model changed; triggers a repaint.
-
-        // Ask the service for coverage data. On first call (or after invalidate()) the
-        // service runs the full scanner; on subsequent calls it returns the cached list
-        // instantly. Either way, this is PSI work and must stay inside a read action.
-        ReadAction.nonBlocking<List<Coverage>> { CoverageService.getInstance(project).getCoverage() }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.defaultModalityState()) { coverageList ->
-                // We're back on the EDT — safe to modify the Swing tree.
-                root.removeAllChildren()
-                root.userObject = if (coverageList.isEmpty()) "No expect declarations found" else "Expect declarations"
-                // Each tree node holds a Coverage object. The renderer reads coverage.expect
-                // for now; issue #4 will expand nodes with per-platform ✓/✗ children.
-                coverageList.sortedBy { it.expect.fqName.asString() }.forEach { coverage ->
-                    root.add(DefaultMutableTreeNode(coverage))
-                }
-                // Tell the JTree the model has changed so it repaints with the new nodes.
-                model.reload()
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
+        // ─────────────────────────────────────────────────────────────────────────
+        // 10. ADD TO TOOL WINDOW
+        // ─────────────────────────────────────────────────────────────────────────
+        toolWindow.contentManager.addContent(
+            toolWindow.contentManager.factory.createContent(panel, null, false),
+        )
     }
 }
