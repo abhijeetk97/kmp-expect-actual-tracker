@@ -17,6 +17,7 @@ import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.JBColor
 import com.intellij.ui.SimpleTextAttributes
+import com.intellij.ui.components.JBLoadingPanel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.concurrency.AppExecutorUtil
@@ -28,7 +29,6 @@ import javax.swing.JPanel
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
-import javax.swing.tree.TreePath
 
 /**
  * UI-only data class representing a single platform row under an expect node.
@@ -94,26 +94,34 @@ data class PlatformNode(
  * ----------------
  *   JPanel (BorderLayout)
  *   ├─ NORTH: ActionToolbar  ← Refresh + "Show incomplete only" filter
- *   └─ CENTER: JBScrollPane
- *                └─ Tree
- *                     ├─ Coverage (parent) — "platformName()  [2/3 platforms]"
- *                     │    ├─ PlatformNode — "Android  ✓"
- *                     │    ├─ PlatformNode — "iOS  ✓"
- *                     │    └─ PlatformNode — "JVM  ✗ missing"   ← red
- *                     └─ Coverage (parent) — "UserAgent  [1/2 platforms]"  ← red name
- *                          ├─ PlatformNode — "Android  ✓"
- *                          └─ PlatformNode — "iOS  ✗ missing"
+ *   └─ CENTER: JBLoadingPanel          ← shows spinner while scanning
+ *                └─ JBScrollPane
+ *                     └─ Tree
+ *                          ├─ Coverage (parent) — "platformName()  [2/3 platforms]"
+ *                          │    ├─ PlatformNode — "Android  ✓"
+ *                          │    ├─ PlatformNode — "iOS  ✓"
+ *                          │    └─ PlatformNode — "JVM  ✗ missing"   ← red
+ *                          └─ ...
+ *
+ * LOADING / EMPTY STATES
+ * -----------------------
+ * The plugin handles four distinct states:
+ *
+ *   1. Scanning    — JBLoadingPanel spinner is active (startLoading)
+ *   2. Gradle sync — only build scripts visible; show "Gradle sync required" in tree root
+ *   3. Not KMP     — no commonMain source set; show "No KMP modules detected"
+ *   4. KMP results — coverage tree populated (possibly with "all covered" or per-expect nodes)
  *
  * MUTABLE STATE IN LOCAL FUNCTIONS
  * ----------------------------------
- * All state for this tool window instance (the coverage list and filter flag) is held
- * as local `var` variables inside createToolWindowContent(). The local helper functions
- * (applyToTree, refresh) and the action lambdas all capture those vars as closures.
+ * All state for this tool window instance (coverage list, filter flag) is held as local
+ * `var` variables inside createToolWindowContent(). Local helper functions and action
+ * lambdas capture them as closures.
  *
  * This is intentional: ToolWindowFactory is a singleton shared across all open projects.
- * Putting state in instance fields would mean two simultaneously open projects would
- * share (and corrupt) each other's coverage data. Local vars in createToolWindowContent
- * are created fresh for each project window, so each project gets its own independent state.
+ * Putting state in instance fields would mean two simultaneously-open projects share
+ * (and corrupt) each other's coverage data. Local vars in createToolWindowContent are
+ * created fresh per project window, so each project gets independent state.
  */
 class ExpectActualToolWindowFactory : ToolWindowFactory {
 
@@ -130,26 +138,34 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         val tree = Tree(model)
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 2. MUTABLE STATE — captured by local functions below
+        // 2. LOADING PANEL
         // ─────────────────────────────────────────────────────────────────────────
-        // The last coverage list fetched from CoverageService. Starts empty; populated
-        // by the first refresh() call. Retained so the filter can re-render without
-        // re-scanning when the user toggles "show incomplete only".
-        var coverageList: List<Coverage> = emptyList()
+        // JBLoadingPanel is an IntelliJ component that wraps any other component and
+        // can overlay it with an animated spinner. Two key calls:
+        //   startLoading() — shows the spinner on top of the wrapped content
+        //   stopLoading()  — hides the spinner, revealing the content underneath
+        //
+        // The second constructor argument is a Disposable — the platform uses it to
+        // clean up the panel's internal timer when the project closes. Project itself
+        // implements Disposable, so passing `project` here is the standard pattern.
+        //
+        // We start in loading state immediately so the user sees the spinner from the
+        // very first moment the tool window opens, not a blank panel.
+        val loadingPanel = JBLoadingPanel(BorderLayout(), project)
+        loadingPanel.add(JBScrollPane(tree), BorderLayout.CENTER)
+        loadingPanel.startLoading()
 
-        // Whether the "show incomplete only" filter is currently active.
+        // ─────────────────────────────────────────────────────────────────────────
+        // 3. MUTABLE STATE — captured by local functions below
+        // ─────────────────────────────────────────────────────────────────────────
+        var coverageList: List<Coverage> = emptyList()
         var showIncompleteOnly = false
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 3. applyToTree() — rebuild the tree from the current coverageList + filter
+        // 4. applyToTree() — rebuild the tree from coverageList + filter state
         // ─────────────────────────────────────────────────────────────────────────
-        // This is a LOCAL FUNCTION (a Kotlin feature: a function defined inside another
-        // function). It captures `coverageList`, `showIncompleteOnly`, `root`, `model`,
-        // and `tree` from the enclosing scope.
-        //
-        // Separating this from refresh() is the key to the "filter without re-scan"
-        // behaviour: refresh() fetches data and updates `coverageList`, then calls
-        // applyToTree(). The filter toggle action only calls applyToTree() — no fetch.
+        // Only called when the project IS KMP (ProjectState.KMP). The non-KMP and
+        // Gradle-sync states are handled directly in refresh() before reaching here.
         fun applyToTree() {
             val toShow = if (showIncompleteOnly) {
                 coverageList.filter { !it.isComplete }
@@ -159,32 +175,24 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
 
             root.removeAllChildren()
             root.userObject = when {
-                coverageList.isEmpty() -> "No expect declarations found"
+                coverageList.isEmpty() -> "No expect declarations found in this project"
                 toShow.isEmpty()       -> "All expects are fully covered 🎉"
                 else                   -> "Expect declarations"
             }
 
             toShow.sortedBy { it.expect.fqName.asString() }.forEach { coverage ->
                 val parentNode = DefaultMutableTreeNode(coverage)
-
-                // Add one child row per known platform, sorted alphabetically so the
-                // order is stable and easy to scan visually.
                 coverage.knownPlatforms.sorted().forEach { platform ->
-                    // Look up whether this platform has a matching `actual`.
-                    // actualsByPlatform[platform] is non-null iff an actual was found.
                     val ptr = coverage.actualsByPlatform[platform]
                     parentNode.add(DefaultMutableTreeNode(PlatformNode(platform, ptr)))
                 }
-
                 root.add(parentNode)
             }
 
             model.reload()
 
-            // Expand all parent (Coverage) rows so the user immediately sees the
-            // platform children without having to click each one open.
-            // We walk forward while rowCount grows: expandRow(i) makes child rows
-            // visible, increasing rowCount, so the loop naturally expands everything.
+            // Expand all parent nodes so platform children are visible immediately.
+            // Walking forward while rowCount grows handles dynamically added rows.
             var i = 0
             while (i < tree.rowCount) {
                 tree.expandRow(i)
@@ -193,37 +201,73 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 4. refresh() — fetch from cache (or re-scan) then apply to tree
+        // 5. refresh() — detect project state, fetch coverage, update UI
         // ─────────────────────────────────────────────────────────────────────────
         fun refresh() {
+            // Show the spinner immediately while the background work runs.
+            loadingPanel.startLoading()
             root.removeAllChildren()
-            root.userObject = "Scanning…"
             model.reload()
 
-            // Ask the service for coverage data. CoverageService returns the cached
-            // list if available, or runs the full scanner on first call / after invalidate().
-            // Either way this is PSI work, so it must stay inside a read action.
-            ReadAction.nonBlocking<List<Coverage>> {
-                CoverageService.getInstance(project).getCoverage()
+            // The background lambda returns a Pair so we can pass both the project
+            // state (for the empty-state message) and the coverage list (for the tree)
+            // back to the EDT in a single finishOnUiThread call.
+            //
+            // We only call CoverageService when the project is actually KMP —
+            // no point scanning for expects in a non-KMP or unsynced project.
+            ReadAction.nonBlocking<Pair<ProjectState, List<Coverage>>> {
+                val state = ExpectActualScanner.detectProjectState(project)
+                val coverage = if (state == ProjectState.KMP) {
+                    CoverageService.getInstance(project).getCoverage()
+                } else {
+                    emptyList()
+                }
+                Pair(state, coverage)
             }
                 .inSmartMode(project)
                 .expireWith(project)
-                .finishOnUiThread(ModalityState.defaultModalityState()) { list ->
-                    // Back on the EDT — safe to touch Swing state.
-                    coverageList = list
-                    applyToTree()
+                .finishOnUiThread(ModalityState.defaultModalityState()) { (state, list) ->
+                    // Scan complete — hide the spinner regardless of outcome.
+                    loadingPanel.stopLoading()
+
+                    when (state) {
+                        // ── Not synced: Gradle modules not imported yet ───────────
+                        // The user opened a project but hasn't run Gradle sync, so only
+                        // build scripts are visible to our file index. Guide them to fix it.
+                        ProjectState.GRADLE_SYNC_REQUIRED -> {
+                            root.removeAllChildren()
+                            root.userObject = "Gradle sync required — open the Gradle panel and click ↺"
+                            model.reload()
+                        }
+
+                        // ── Not KMP: no commonMain source set found ───────────────
+                        // Kotlin source files exist but none live under commonMain.
+                        // This is either a pure Android/JVM project, or a KMP project
+                        // where Gradle sync ran but the KMP modules weren't created
+                        // (e.g. missing Kotlin Multiplatform plugin in build.gradle.kts).
+                        ProjectState.NOT_KMP -> {
+                            root.removeAllChildren()
+                            root.userObject = "No Kotlin Multiplatform modules detected"
+                            model.reload()
+                        }
+
+                        // ── KMP project: populate the coverage tree ───────────────
+                        ProjectState.KMP -> {
+                            coverageList = list
+                            applyToTree()
+                        }
+                    }
                 }
                 .submit(AppExecutorUtil.getAppExecutorService())
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 5. RENDERER — controls how each row looks
+        // 6. RENDERER — controls how each row looks
         // ─────────────────────────────────────────────────────────────────────────
         // customizeCellRenderer is called for EVERY visible row on EVERY repaint.
         // Keep it fast: no PSI access, no IO, just append() calls.
         //
-        // COVERED_ATTRS: a muted green that reads well in both light and dark themes.
-        //   JBColor(lightThemeColor, darkThemeColor) — the platform picks the right one.
+        // JBColor(lightColor, darkColor) picks the right colour for the active theme.
         val coveredAttrs = SimpleTextAttributes(
             SimpleTextAttributes.STYLE_PLAIN,
             JBColor(Color(0, 128, 0), Color(98, 150, 85)),
@@ -246,13 +290,9 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
                     // ── PARENT ROW: one expect declaration ──────────────────────
                     is Coverage -> {
                         val e = obj.expect
-
-                        // [kind] badge in dim grey
                         append("[${e.kind}] ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
 
-                        // Declaration name: red if any platform is missing, normal otherwise.
-                        // ERROR_ATTRIBUTES is the platform's standard "problem" colour — it
-                        // automatically adapts to dark/light theme and editor colour schemes.
+                        // Name turns red when any platform is missing.
                         val nameAttrs = if (obj.isComplete) {
                             SimpleTextAttributes.REGULAR_ATTRIBUTES
                         } else {
@@ -260,13 +300,10 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
                         }
                         append(e.displayName, nameAttrs)
 
-                        // Package path in small grey after the name
+                        // Package path in small grey
                         append("  ${e.fqName.parent().asString()}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
 
-                        // Coverage badge: "  [2/3 platforms]" — always grey regardless of
-                        // completeness (the red name already draws attention to problems).
-                        // Only shown when there are known platforms; hides for expect-only
-                        // declarations with no actuals anywhere yet.
+                        // Coverage badge — only shown when platforms are known
                         if (obj.knownPlatforms.isNotEmpty()) {
                             append("  [${obj.coverageSummary}]", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                         }
@@ -276,80 +313,59 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
                     is PlatformNode -> {
                         append(obj.platform, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                         if (obj.isCovered) {
-                            // ✓ in green — the actual exists
                             append("  ✓", coveredAttrs)
                         } else {
-                            // ✗ missing in red — no actual for this platform
                             append("  ✗ missing", SimpleTextAttributes.ERROR_ATTRIBUTES)
                         }
                     }
 
-                    // ── ROOT / PLACEHOLDER strings ────────────────────────────────
+                    // ── ROOT / PLACEHOLDER strings (including empty-state messages) ──
                     else -> append(obj.toString(), SimpleTextAttributes.REGULAR_ATTRIBUTES)
                 }
             }
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 6. NAVIGATION ON DOUBLE-CLICK
+        // 7. NAVIGATION ON DOUBLE-CLICK
         // ─────────────────────────────────────────────────────────────────────────
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 2) return
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
 
-                // Determine which pointer to navigate to based on node type:
-                //   Coverage (parent) → jump to the `expect` declaration
-                //   PlatformNode (child, covered) → jump to the `actual` declaration
-                //   PlatformNode (child, missing) → nothing to navigate to
                 val pointer: SmartPsiElementPointer<*>? = when (val obj = node.userObject) {
-                    is Coverage    -> obj.expect.pointer
-                    is PlatformNode -> obj.pointer  // null if missing — handled below
-                    else           -> null
+                    is Coverage     -> obj.expect.pointer
+                    is PlatformNode -> obj.pointer // null when missing — handled below
+                    else            -> null
                 }
                 pointer ?: return
 
-                // Reading PSI must happen inside a read action (even just dereferencing
-                // the pointer). nonBlocking keeps us off the EDT during the read.
                 ReadAction.nonBlocking<NavigatablePsiElement?> {
                     pointer.element as? NavigatablePsiElement
                 }.finishOnUiThread(ModalityState.defaultModalityState()) { el ->
-                    // navigate(true) opens the file and moves the caret to the declaration.
-                    // `true` = request focus (bring editor to front).
                     el?.navigate(true)
                 }.submit(AppExecutorUtil.getAppExecutorService())
             }
         })
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 7. TOOLBAR ACTIONS
+        // 8. TOOLBAR ACTIONS
         // ─────────────────────────────────────────────────────────────────────────
 
-        // ── Refresh ──────────────────────────────────────────────────────────────
         val refreshAction = object : AnAction(
             "Refresh",
             "Invalidate cache and re-scan the project for expect declarations",
             AllIcons.Actions.Refresh,
         ) {
             override fun actionPerformed(e: AnActionEvent) {
-                // Drop the cached coverage so getCoverage() runs the scanner again.
                 CoverageService.getInstance(project).invalidate()
                 refresh()
             }
         }
 
-        // ── "Show incomplete only" filter toggle ──────────────────────────────────
-        // ToggleAction is IntelliJ's built-in action for a two-state (on/off) toolbar
-        // button. The platform automatically renders it with a "pressed" visual state
-        // when isSelected() returns true — no extra UI code needed.
-        //
-        // isSelected() is called by the platform on every toolbar repaint to decide
-        // whether to draw the button as pressed/highlighted. Keep it fast.
-        //
-        // setSelected() is called when the user clicks the button. We flip the flag
-        // and call applyToTree() — which re-renders from the already-loaded coverageList
-        // without triggering a new background scan. This is the "filter without re-scan"
-        // behaviour described in the issue.
+        // ToggleAction is IntelliJ's two-state toolbar button. The platform renders it
+        // with a "pressed" highlight when isSelected() returns true — no extra UI needed.
+        // setSelected() just flips the flag and re-renders from the cached list in memory.
         val filterAction = object : ToggleAction(
             "Show incomplete only",
             "Hide expects that are fully covered on all platforms",
@@ -363,36 +379,31 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
             }
         }
 
-        // DefaultActionGroup is a container for one or more AnActions. The toolbar
-        // renders each action as a button in the order they appear in the group.
         val toolbar = ActionManager.getInstance().createActionToolbar(
             "ExpectActualToolbar",
             DefaultActionGroup(refreshAction, filterAction),
-            true, // true = horizontal toolbar
+            true,
         )
         toolbar.targetComponent = tree
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 8. PANEL ASSEMBLY
+        // 9. PANEL ASSEMBLY
         // ─────────────────────────────────────────────────────────────────────────
-        // BorderLayout divides a container into 5 zones. CENTER expands to fill all
-        // remaining space (the tree). NORTH stays at its natural height (toolbar strip).
         val panel = JPanel(BorderLayout()).apply {
             add(toolbar.component, BorderLayout.NORTH)
-            add(JBScrollPane(tree), BorderLayout.CENTER)
+            add(loadingPanel, BorderLayout.CENTER)  // loadingPanel wraps the scroll+tree
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 9. INITIAL SCAN
+        // 10. INITIAL SCAN
         // ─────────────────────────────────────────────────────────────────────────
-        // DumbService.runWhenSmart defers the first scan until the IDE has finished
-        // indexing. Without this, FileTypeIndex returns 0 files and the tree shows
-        // "No expect declarations found" permanently.
-        // See the long comment in the previous commit for full details on the timing.
+        // DumbService.runWhenSmart defers the scan until indexing is complete.
+        // The spinner (startLoading above) stays visible during this wait, so the
+        // user always sees feedback rather than a blank panel.
         DumbService.getInstance(project).runWhenSmart { refresh() }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 10. ADD TO TOOL WINDOW
+        // 11. ADD TO TOOL WINDOW
         // ─────────────────────────────────────────────────────────────────────────
         toolWindow.contentManager.addContent(
             toolWindow.contentManager.factory.createContent(panel, null, false),
