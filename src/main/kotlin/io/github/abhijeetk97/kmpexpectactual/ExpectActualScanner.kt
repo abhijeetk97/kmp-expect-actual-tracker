@@ -55,6 +55,30 @@ import org.jetbrains.kotlin.psi.KtProperty
  * is rare in real KMP code (overloaded expects are uncommon) but worth noting. The
  * Kotlin Analysis API (stretch goal, issue #14) would resolve this precisely.
  */
+/**
+ * Describes what kind of project the scanner sees when it inspects the file index.
+ * Used by the tool window to choose the right empty/error state message.
+ *
+ * The three values form a decision tree:
+ *
+ *   projectScope has no .kt files?
+ *     └─ YES → GRADLE_SYNC_REQUIRED  (only .kts scripts visible; KMP modules not imported)
+ *     └─ NO →
+ *          projectScope has a file under /commonMain/?
+ *            └─ NO  → NOT_KMP   (plain Kotlin project, or KMP without commonMain)
+ *            └─ YES → KMP       (proceed to scan for expects)
+ */
+enum class ProjectState {
+    /** Only .kts build scripts are in the project scope — Gradle sync hasn't been run yet. */
+    GRADLE_SYNC_REQUIRED,
+
+    /** .kt source files are visible but none live under a commonMain source set. */
+    NOT_KMP,
+
+    /** At least one file under commonMain is present — this is a KMP project. */
+    KMP,
+}
+
 object ExpectActualScanner {
 
     private val LOG = Logger.getInstance(ExpectActualScanner::class.java)
@@ -62,6 +86,34 @@ object ExpectActualScanner {
     // ─────────────────────────────────────────────────────────────────────────
     // PUBLIC API
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Inspects the project's file index to determine what kind of project this is.
+     *
+     * Why three states instead of a simple boolean?
+     * - GRADLE_SYNC_REQUIRED and NOT_KMP both produce an empty coverage list, but they
+     *   need completely different messages in the UI. Bundling them into "isEmpty" would
+     *   lose that distinction.
+     *
+     * The `/commonMain/` path check is reliable because:
+     * - The KMP Gradle plugin always creates a source set named exactly `commonMain`.
+     * - IntelliJ registers the source directory with that name in the file path.
+     * - It's a directory name check, not a substring match on package names, so false
+     *   positives are extremely unlikely.
+     *
+     * Must be called inside a read action.
+     */
+    fun detectProjectState(project: Project): ProjectState {
+        val ktFiles = FileTypeIndex.getFiles(KotlinFileType.INSTANCE, GlobalSearchScope.projectScope(project))
+        return when {
+            // No .kt files at all — only build scripts are registered; need Gradle sync.
+            ktFiles.none { it.extension == "kt" }          -> ProjectState.GRADLE_SYNC_REQUIRED
+            // .kt files present but none under commonMain — not a KMP project.
+            ktFiles.none { "/commonMain/" in it.path }     -> ProjectState.NOT_KMP
+            // commonMain source set found — this is a KMP project.
+            else                                            -> ProjectState.KMP
+        }
+    }
 
     /**
      * The main entry point for the coverage model. Returns one [Coverage] record per
