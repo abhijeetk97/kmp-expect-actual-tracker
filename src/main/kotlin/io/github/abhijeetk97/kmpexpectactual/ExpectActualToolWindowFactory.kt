@@ -1,7 +1,13 @@
 package io.github.abhijeetk97.kmpexpectactual
 
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -11,8 +17,10 @@ import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.concurrency.AppExecutorUtil
+import java.awt.BorderLayout
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import javax.swing.JPanel
 import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
@@ -48,10 +56,17 @@ import javax.swing.tree.DefaultTreeModel
  *   any Swing component from here.
  *
  * Our pattern:
- *   1. On the EDT, set up the UI (tree, renderer, click listener).
+ *   1. On the EDT, set up the UI (tree, renderer, click listener, toolbar).
  *   2. Kick off a non-blocking read action on a background thread to run the scanner.
  *   3. When the scanner finishes, the platform marshals the result back to the EDT
  *      via finishOnUiThread(), where we safely update the Swing tree.
+ *
+ * LAYOUT STRUCTURE
+ * ----------------
+ *   JPanel (BorderLayout)
+ *   ├─ NORTH:  ActionToolbar  ← Refresh button lives here
+ *   └─ CENTER: JBScrollPane
+ *                └─ Tree      ← expect declarations listed here
  */
 class ExpectActualToolWindowFactory : ToolWindowFactory {
 
@@ -144,22 +159,91 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         })
 
         // -------------------------------------------------------------------------
-        // 4. KICK OFF THE INITIAL SCAN
+        // 4. TOOLBAR — Refresh button
         // -------------------------------------------------------------------------
-        refresh(project, root, model)
+        // IntelliJ actions (AnAction) are the platform's way of representing any
+        // user-triggered operation — menu items, toolbar buttons, keyboard shortcuts
+        // all go through the same AnAction system.
+        //
+        // Here we create an anonymous AnAction inline. The three constructor arguments
+        // are: display text, description (shown in the status bar on hover), and icon.
+        // AllIcons is the platform's built-in icon library — no image files needed.
+        //
+        // The lambda captures `project`, `root`, and `model` from the enclosing scope,
+        // so when the button is clicked it has everything it needs to re-run the scan.
+        val refreshAction = object : AnAction("Refresh", "Re-scan the project for expect declarations", AllIcons.Actions.Refresh) {
+            override fun actionPerformed(e: AnActionEvent) {
+                // Just delegate to the same refresh() used on initial open.
+                refresh(project, root, model)
+            }
+        }
+
+        // DefaultActionGroup is a container for one or more AnActions. The toolbar
+        // renders each action in the group as a button.
+        val actionGroup = DefaultActionGroup(refreshAction)
+
+        // ActionManager is the platform singleton that owns all registered actions and
+        // creates toolbars. The string "ExpectActualToolbar" is an ID used internally
+        // by the platform for things like shortcut customisation — it just needs to be
+        // unique, it doesn't appear in any UI.
+        //
+        // The boolean `true` = horizontal toolbar (false = vertical).
+        val toolbar = ActionManager.getInstance()
+            .createActionToolbar("ExpectActualToolbar", actionGroup, true)
+
+        // targetComponent tells the toolbar which component's DataContext to use when
+        // building AnActionEvents. Without this the toolbar logs a warning and some
+        // context-sensitive actions won't work correctly.
+        toolbar.targetComponent = tree
 
         // -------------------------------------------------------------------------
-        // 5. ADD THE PANEL TO THE TOOL WINDOW
+        // 5. ASSEMBLE THE PANEL
+        // -------------------------------------------------------------------------
+        // BorderLayout divides a container into 5 zones: NORTH, SOUTH, EAST, WEST,
+        // CENTER. CENTER expands to fill all remaining space — which is what we want
+        // for the tree. NORTH stays at its natural height — which is what we want for
+        // the toolbar strip.
+        val panel = JPanel(BorderLayout()).apply {
+            add(toolbar.component, BorderLayout.NORTH)
+            add(JBScrollPane(tree), BorderLayout.CENTER)
+        }
+
+        // -------------------------------------------------------------------------
+        // 6. KICK OFF THE INITIAL SCAN
+        // -------------------------------------------------------------------------
+        // WHY DumbService.runWhenSmart instead of just calling refresh() directly:
+        //
+        // On project open the IDE goes through several phases:
+        //   1. Project model loaded → smart mode declared briefly
+        //   2. VFS refresh runs → 100s of file roots are mounted into memory
+        //   3. VFS refresh triggers re-indexing → dumb mode again
+        //   4. Indexing completes → smart mode, this time for real
+        //
+        // If we call refresh() immediately, our ReadAction.nonBlocking().inSmartMode()
+        // fires during window (1) — before the VFS has any files. FileTypeIndex returns
+        // 0 Kotlin files and we display "No expect declarations found."
+        //
+        // DumbService.runWhenSmart defers execution until smart mode is stable. More
+        // importantly, it re-runs the callback every time the project re-enters smart
+        // mode — so it naturally catches window (4) even if (1) fires first.
+        //
+        // The Refresh button bypasses this and calls refresh() directly, which is fine
+        // because by the time the user can click it the project is fully loaded.
+        DumbService.getInstance(project).runWhenSmart { refresh(project, root, model) }
+
+        // -------------------------------------------------------------------------
+        // 7. ADD THE PANEL TO THE TOOL WINDOW
         // -------------------------------------------------------------------------
         // ContentManager manages the tab(s) inside the tool window strip.
-        // We wrap our tree in a scroll pane and create a single unnamed tab (null title).
+        // We create a single unnamed tab (null title) containing our whole panel.
         val content = toolWindow.contentManager.factory
-            .createContent(JBScrollPane(tree), null, false)
+            .createContent(panel, null, false)
         toolWindow.contentManager.addContent(content)
     }
 
     /**
      * Runs the scanner on a background thread and updates the tree on the EDT.
+     * Called both on initial open and when the Refresh button is clicked.
      *
      * BREAKDOWN OF THE READ ACTION CHAIN
      * -----------------------------------
