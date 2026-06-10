@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Custom SVG plugin icon (`pluginIcon.svg` / `pluginIcon_dark.svg`) shown in the Plugin Manager and Marketplace
+- Custom tool window strip icon (`toolWindowExpectActual.svg`) replacing the generic structure icon
+
 ---
 
 ## [0.1.0] - 2026-06-11
