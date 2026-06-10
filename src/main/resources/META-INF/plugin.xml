@@ -20,4 +20,12 @@
         <supportsKotlinPluginMode supportsK1="true" supportsK2="true" />
     </extensions>
 
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="Expect/Actual"
+            anchor="right"
+            factoryClass="io.github.abhijeetk97.kmpexpectactual.ExpectActualToolWindowFactory"
+            icon="AllIcons.Toolwindows.ToolWindowStructure" />
+    </extensions>
+
 </idea-plugin>
