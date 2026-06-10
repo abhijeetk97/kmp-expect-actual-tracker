@@ -1,63 +1,67 @@
 name: Bug report
-description: Create a report to help us improve
+description: Something is broken or behaving unexpectedly
 labels: ["bug"]
 body:
 
   - type: textarea
-    id: issue
+    id: description
     attributes:
       label: What happened?
-      description: A clear and concise description of what the bug is.
+      description: What did you expect to see vs. what you actually saw?
     validations:
       required: true
 
   - type: textarea
-    id: logs
-    attributes:
-      label: Relevant log output or stack trace
-      description: |
-        Please copy and paste any relevant log output.
-        Add the full stack trace if available.
-        If possible, run the failing task with `--stacktrace` flag.
-        
-        *This will be automatically formatted into code, so there is no need for backticks.*
-      render: shell
-
-  - type: textarea
-    id: steps
+    id: reproduce
     attributes:
       label: Steps to reproduce
-      description: Steps to reproduce the behavior – provide your build configuration.
+      placeholder: |
+        1. Open a KMP project with …
+        2. Open the Expect/Actual tool window
+        3. …
     validations:
       required: true
 
   - type: input
-    id: version
+    id: plugin_version
     attributes:
-      label: Gradle IntelliJ Plugin version
-      placeholder: 1.16.0
+      label: Plugin version
+      placeholder: "0.1.0"
     validations:
       required: true
 
   - type: input
-    id: gradle
+    id: ide
     attributes:
-      label: Gradle version
-      placeholder: 8.2.1
+      label: IDE and version
+      placeholder: "IntelliJ IDEA 2024.3.5 / Android Studio Ladybug 2024.2.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kotlin_mode
+    attributes:
+      label: Kotlin plugin mode
+      description: Settings → Languages & Frameworks → Kotlin → Enable K2 mode
+      options:
+        - K2 (default since 2025.1)
+        - K1 (legacy)
+        - Not sure
     validations:
       required: true
 
   - type: dropdown
     id: os
     attributes:
-      label: Operating System
+      label: Operating system
       options:
         - macOS
         - Linux
         - Windows
 
-  - type: input
-    id: url
+  - type: textarea
+    id: logs
     attributes:
-      label: Link to build, i.e. failing GitHub Action job
-      placeholder: https://github.com/username/project/actions/runs/1234567890
+      label: Relevant log output
+      description: Help → Show Log in Finder/Explorer, search for `KMP Scanner`, paste relevant lines here.
+      render: shell
