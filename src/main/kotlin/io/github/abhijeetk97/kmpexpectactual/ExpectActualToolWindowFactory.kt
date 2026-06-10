@@ -118,13 +118,16 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
             ) {
                 val node = value as? DefaultMutableTreeNode ?: return
                 when (val obj = node.userObject) {
-                    is ExpectEntry -> {
+                    is Coverage -> {
+                        // Unwrap the ExpectEntry from the Coverage wrapper for display.
+                        // Issue #4 will extend this branch to also show per-platform nodes.
+                        val e = obj.expect
                         // SimpleTextAttributes controls colour and style (bold, italic, strikethrough).
                         // GRAYED = dim grey, REGULAR = normal foreground colour.
-                        append("[${obj.kind}] ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
-                        append(obj.displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                        append("[${e.kind}] ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                        append(e.displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
                         // The package name in small grey after the declaration name.
-                        append("  ${obj.fqName.parent().asString()}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                        append("  ${e.fqName.parent().asString()}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     }
                     // Root / placeholder nodes just show their string label.
                     else -> append(obj.toString(), SimpleTextAttributes.REGULAR_ATTRIBUTES)
@@ -139,7 +142,8 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 2) return
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
-                val entry = node.userObject as? ExpectEntry ?: return
+                // Tree nodes now hold Coverage objects; unwrap to reach the ExpectEntry.
+                val entry = (node.userObject as? Coverage)?.expect ?: return
 
                 // We need the live PsiElement to navigate. But reading PSI outside a
                 // read action throws an exception. ReadAction.nonBlocking runs the
@@ -173,7 +177,9 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // so when the button is clicked it has everything it needs to re-run the scan.
         val refreshAction = object : AnAction("Refresh", "Re-scan the project for expect declarations", AllIcons.Actions.Refresh) {
             override fun actionPerformed(e: AnActionEvent) {
-                // Just delegate to the same refresh() used on initial open.
+                // Invalidate the cache first so getCoverage() re-scans the project
+                // rather than returning the stale cached result.
+                CoverageService.getInstance(project).invalidate()
                 refresh(project, root, model)
             }
         }
@@ -277,15 +283,20 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         root.userObject = "Scanning…"
         model.reload() // reload() tells the JTree the model changed; triggers a repaint.
 
-        ReadAction.nonBlocking<List<ExpectEntry>> { ExpectActualScanner.findExpects(project) }
+        // Ask the service for coverage data. On first call (or after invalidate()) the
+        // service runs the full scanner; on subsequent calls it returns the cached list
+        // instantly. Either way, this is PSI work and must stay inside a read action.
+        ReadAction.nonBlocking<List<Coverage>> { CoverageService.getInstance(project).getCoverage() }
             .inSmartMode(project)
             .expireWith(project)
-            .finishOnUiThread(ModalityState.defaultModalityState()) { entries ->
+            .finishOnUiThread(ModalityState.defaultModalityState()) { coverageList ->
                 // We're back on the EDT — safe to modify the Swing tree.
                 root.removeAllChildren()
-                root.userObject = if (entries.isEmpty()) "No expect declarations found" else "Expect declarations"
-                entries.sortedBy { it.fqName.asString() }.forEach { entry ->
-                    root.add(DefaultMutableTreeNode(entry))
+                root.userObject = if (coverageList.isEmpty()) "No expect declarations found" else "Expect declarations"
+                // Each tree node holds a Coverage object. The renderer reads coverage.expect
+                // for now; issue #4 will expand nodes with per-platform ✓/✗ children.
+                coverageList.sortedBy { it.expect.fqName.asString() }.forEach { coverage ->
+                    root.add(DefaultMutableTreeNode(coverage))
                 }
                 // Tell the JTree the model has changed so it repaints with the new nodes.
                 model.reload()
