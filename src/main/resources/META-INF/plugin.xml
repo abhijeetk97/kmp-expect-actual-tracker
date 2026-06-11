@@ -25,7 +25,7 @@
             id="Expect/Actual"
             anchor="right"
             factoryClass="io.github.abhijeetk97.kmpexpectactual.ExpectActualToolWindowFactory"
-            icon="AllIcons.Toolwindows.ToolWindowStructure" />
+            icon="/icons/toolWindowExpectActual.svg" />
     </extensions>
 
 </idea-plugin>
