@@ -2,7 +2,6 @@
 
 > A project-wide coverage dashboard for Kotlin Multiplatform `expect`/`actual` declarations — surfaced as an IntelliJ / Android Studio tool window.
 
-[![Build](https://github.com/abhijeetk97/kmp-expect-actual-tracker/actions/workflows/build.yml/badge.svg)](https://github.com/abhijeetk97/kmp-expect-actual-tracker/actions/workflows/build.yml)
 [![Version](https://img.shields.io/github/v/release/abhijeetk97/kmp-expect-actual-tracker?label=latest)](https://github.com/abhijeetk97/kmp-expect-actual-tracker/releases)
 [![License](https://img.shields.io/github/license/abhijeetk97/kmp-expect-actual-tracker)](LICENSE)
 
