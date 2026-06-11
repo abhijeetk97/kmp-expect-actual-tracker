@@ -13,6 +13,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Custom SVG plugin icon (`pluginIcon.svg` / `pluginIcon_dark.svg`) shown in the Plugin Manager and Marketplace
 - Custom tool window strip icon (`toolWindowExpectActual.svg`) replacing the generic structure icon
 
+### Fixed
+
+- **Multi-module platform detection** — in projects with multiple Gradle modules (e.g. `:core:analytics`, `:core:common`), the tool window was showing every module's source set as a separate "platform" and marking every expect as missing on all of them. Root cause: the platform-detection fallback used the raw IntelliJ module name when no known platform pattern matched. Fix: detect platform from the **file path** first (`/androidMain/`, `/iosMain/`, `/src/main/` for AGP-style Android libraries, etc.); fall back to the module-name suffix only if the path gives no match; drop the entry entirely if the platform is still unrecognised. This keeps `knownPlatforms` clean and prevents fake platform rows.
+
 ---
 
 ## [0.1.0] - 2026-06-11

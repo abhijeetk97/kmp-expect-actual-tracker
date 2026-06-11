@@ -1,7 +1,6 @@
 package io.github.abhijeetk97.kmpexpectactual
 
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiManager
@@ -54,6 +53,16 @@ import org.jetbrains.kotlin.psi.KtProperty
  * signatures (overloads), they collide in our map and one will shadow the other. This
  * is rare in real KMP code (overloaded expects are uncommon) but worth noting. The
  * Kotlin Analysis API (stretch goal, issue #14) would resolve this precisely.
+ *
+ * PLATFORM DETECTION STRATEGY
+ * ----------------------------
+ * v1 used module name heuristics exclusively (e.g., checking if "android" appears in
+ * the IntelliJ module name). This broke for multi-module projects, where IntelliJ
+ * registers module names like "MyApp.core.analytics.main" — none of the platform
+ * keywords match, so the raw module name became the platform label. The fix uses
+ * the file PATH as the primary signal, falling back to the module name only for
+ * edge cases, and dropping the raw-name fallback entirely so unrecognised source
+ * sets never pollute the knownPlatforms set.
  */
 /**
  * Describes what kind of project the scanner sees when it inspects the file index.
@@ -221,7 +230,7 @@ object ExpectActualScanner {
         val psiManager = PsiManager.getInstance(project)
 
         // Outer key: FqName of the actual (matches the expect's FqName)
-        // Inner key: platform label derived from the module the file lives in
+        // Inner key: platform label derived from the file path / module
         val result = mutableMapOf<FqName, MutableMap<String, SmartPsiElementPointer<*>>>()
 
         val ktFiles = FileTypeIndex.getFiles(
@@ -240,14 +249,20 @@ object ExpectActualScanner {
     /**
      * Recursively walks declarations in one file and records every `actual`.
      *
-     * For each `actual` found:
-     *  - We resolve the module it belongs to via ModuleUtilCore — the module is the
-     *    Gradle source set compiled as a separate unit (e.g. "shared.androidMain").
-     *  - We pass the module to platformOf() to get a human-readable label ("Android").
-     *  - We store a SmartPsiElementPointer (stable handle) rather than the raw element.
+     * Platform resolution order:
+     *  1. File path   — most reliable; checks for source-set directory names like
+     *                   `/androidMain/`, `/iosMain/`, `/src/main/` (AGP style), etc.
+     *  2. Module name — fallback for unusual layouts; extracts the source-set suffix
+     *                   (everything after the last '.') then matches the same patterns.
+     *  3. null / skip — if neither signal resolves to a known platform the entry is
+     *                   dropped. This prevents unrecognised module names (e.g.
+     *                   "MyApp.core.analytics.main" in a multi-module project) from
+     *                   polluting knownPlatforms with fake platform labels.
      *
      * The [out] map is mutated in-place: getOrPut creates a new inner map on first
-     * encounter of a given FqName.
+     * encounter of a given FqName. Multiple actuals mapping to the same platform label
+     * (e.g. two Gradle modules both resolve to "Android") are collapsed — last wins.
+     * This is intentional: the coverage view cares about presence, not multiplicity.
      */
     private fun collectActuals(
         declarations: List<KtDeclaration>,
@@ -259,16 +274,19 @@ object ExpectActualScanner {
                 val named = decl as? KtNamedDeclaration ?: continue
                 val fq = named.fqName ?: continue
 
-                // ModuleUtilCore.findModuleForPsiElement walks the module structure to find
-                // which Gradle module (source set) this PSI element belongs to.
-                // Returns null for files not attached to any module (e.g. scratch files).
-                val module = ModuleUtilCore.findModuleForPsiElement(decl) ?: continue
-                val platform = platformOf(module)
+                // Try path-based detection first (file path → source set directory name).
+                // Fall back to module-name heuristic if the path gives no match.
+                // Skip entirely if platform is still unknown — avoids polluting knownPlatforms.
+                val filePath = named.containingFile?.virtualFile?.path ?: ""
+                val platform = platformFromPath(filePath)
+                    ?: run {
+                        val module = ModuleUtilCore.findModuleForPsiElement(decl) ?: return@run null
+                        platformFromModule(module.name)
+                    }
+                    ?: continue
 
                 // getOrPut: if we haven't seen this FQ name before, insert a fresh map.
-                // Then store the pointer under the platform key. If two actuals exist for
-                // the same FQ name on the same platform (a compile error in valid Kotlin),
-                // the second one wins — acceptable for our purposes.
+                // Then store the pointer under the platform key.
                 out.getOrPut(fq) { mutableMapOf() }[platform] =
                     pointerManager.createSmartPsiElementPointer(named)
             }
@@ -286,51 +304,84 @@ object ExpectActualScanner {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Classifies a Gradle module into a human-readable platform label by inspecting
-     * the module name.
+     * Derives a human-readable platform label from the file's path by looking for
+     * known KMP source-set directory names.
      *
-     * WHY MODULE NAMES WORK
-     * ----------------------
-     * In a KMP Gradle project, the Kotlin Multiplatform plugin creates one IntelliJ
-     * "module" per source set. The module is named after the Gradle project + source set,
-     * e.g. "shared.androidMain", "shared.iosArm64Main", "composeApp.jvmMain".
+     * This is the PRIMARY platform signal. It works correctly for both:
+     *  - Standard KMP projects:  `…/androidMain/kotlin/…` → "Android"
+     *  - AGP-style Android libs: `…/src/main/kotlin/…`    → "Android"
      *
-     * The source set naming conventions are defined by the KMP Gradle plugin and are
-     * consistent across virtually all KMP projects, so substring matching on the
-     * lowercased module name is a reliable heuristic.
+     * Returns null if the path contains no recognised source-set directory, allowing
+     * the caller to fall back to the module-name heuristic.
      *
-     * WHY NOT THE KOTLIN FACET?
-     * -------------------------
-     * Each module carries a KotlinFacet that contains the TargetPlatform (JvmPlatform,
-     * JsPlatform, NativePlatform, etc.). This would be more precise and handle unusual
-     * naming. We use the name heuristic for v1 because:
-     *   - It requires no additional API calls
-     *   - The KotlinFacet API has shifted between plugin versions
-     *   - It's transparent and easy to debug
-     * The Kotlin facet approach is the correct v2 upgrade once the heuristic is validated.
-     *
-     * ORDER MATTERS: more specific patterns must come before generic ones.
-     * ("wasmjs" must be checked before "js"; "ios" before "native".)
+     * Patterns are lowercased and checked as path segments (with slashes) to avoid
+     * false matches on package/class names that happen to contain "ios" or "js".
      */
-    private fun platformOf(module: Module): String {
-        val name = module.name.lowercase()
+    private fun platformFromPath(path: String): String? {
+        val lower = path.lowercase()
         return when {
-            "android" in name  -> "Android"
-            "iosarm64" in name -> "iOS (arm64)"
-            "iossimulator" in name || "iosx64" in name -> "iOS (simulator)"
-            "ios" in name      -> "iOS"
-            "wasmjs" in name   -> "WasmJS"
-            "js" in name       -> "JS"
-            "jvm" in name      -> "JVM"
-            "macos" in name    -> "macOS"
-            "tvos" in name     -> "tvOS"
-            "watchos" in name  -> "watchOS"
-            "mingw" in name || "windows" in name -> "Windows"
-            "linux" in name    -> "Linux"
-            "native" in name   -> "Native"
-            // Fallback: use the raw module name so no actual is ever silently dropped.
-            // The label will look odd in the tree but is better than losing the data.
-            else -> module.name
+            "/androidmain/" in lower                                          -> "Android"
+            "/iosarm64main/" in lower                                         -> "iOS (arm64)"
+            "/iossimulatorarm64main/" in lower || "/iosx64main/" in lower     -> "iOS (simulator)"
+            "/iosmain/" in lower                                               -> "iOS"
+            "/wasmjsmain/" in lower                                            -> "WasmJS"
+            "/jsmain/" in lower                                                -> "JS"
+            "/jvmmain/" in lower                                               -> "JVM"
+            "/desktopmain/" in lower                                           -> "Desktop"
+            "/macosarm64main/" in lower || "/macosx64main/" in lower
+                    || "/macosmain/" in lower                                  -> "macOS"
+            "/tvosmain/" in lower                                              -> "tvOS"
+            "/watchosmain/" in lower                                           -> "watchOS"
+            "/mingwx64main/" in lower || "/mingwmain/" in lower               -> "Windows"
+            "/linuxarm64main/" in lower || "/linuxx64main/" in lower
+                    || "/linuxmain/" in lower                                  -> "Linux"
+            "/nativemain/" in lower                                            -> "Native"
+            // AGP-style Android libraries use /src/main/ instead of /androidMain/.
+            // This pattern is only reached when no KMP-standard source set matched above,
+            // so the false-positive risk for pure-JVM projects is low; KMP actuals simply
+            // don't appear there.
+            "/src/main/" in lower                                              -> "Android"
+            else                                                               -> null
+        }
+    }
+
+    /**
+     * Derives a platform label from the IntelliJ module name — fallback for cases
+     * where the file path doesn't contain a recognisable source-set directory.
+     *
+     * In a multi-module KMP project IntelliJ registers module names like:
+     *   "MyApp.core.analytics.androidMain"  →  suffix = "androidmain"  → "Android"
+     *   "MyApp.core.analytics.main"         →  suffix = "main"         → "Android"
+     *   "MyApp.core.analytics.commonMain"   →  suffix = "commonmain"   → null (skip)
+     *
+     * We strip the project-path prefix by taking everything after the last '.' so
+     * that the same heuristic patterns work regardless of the module hierarchy depth.
+     *
+     * Returns null for commonMain and any unrecognised suffix, so the entry is
+     * dropped rather than stored under a meaningless label.
+     */
+    private fun platformFromModule(moduleName: String): String? {
+        // Extract just the source-set portion: "MyApp.core.analytics.androidMain" → "androidmain"
+        val suffix = moduleName.lowercase().substringAfterLast('.')
+        return when {
+            "android" in suffix || suffix == "main" -> "Android"
+            "iosarm64" in suffix                    -> "iOS (arm64)"
+            "iossimulator" in suffix || "iosx64" in suffix -> "iOS (simulator)"
+            "ios" in suffix                         -> "iOS"
+            "wasmjs" in suffix                      -> "WasmJS"
+            "js" in suffix                          -> "JS"
+            "jvm" in suffix                         -> "JVM"
+            "desktop" in suffix                     -> "Desktop"
+            "macos" in suffix                       -> "macOS"
+            "tvos" in suffix                        -> "tvOS"
+            "watchos" in suffix                     -> "watchOS"
+            "mingw" in suffix || "windows" in suffix -> "Windows"
+            "linux" in suffix                       -> "Linux"
+            "native" in suffix                      -> "Native"
+            // commonMain and any other unrecognised source set — skip.
+            // Returning null prevents the entry from being added to knownPlatforms,
+            // which is what caused the "8 fake platforms" bug in multi-module projects.
+            else                                    -> null
         }
     }
 
