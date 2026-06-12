@@ -2,6 +2,8 @@
 
 > A project-wide coverage dashboard for Kotlin Multiplatform `expect`/`actual` declarations — surfaced as an IntelliJ / Android Studio tool window.
 
+[![JetBrains Marketplace](https://img.shields.io/jetbrains/plugin/v/32220-kmp-expect-actual-tracker.svg?label=marketplace)](https://plugins.jetbrains.com/plugin/32220-kmp-expect-actual-tracker)
+[![Downloads](https://img.shields.io/jetbrains/plugin/d/32220-kmp-expect-actual-tracker.svg)](https://plugins.jetbrains.com/plugin/32220-kmp-expect-actual-tracker)
 [![Version](https://img.shields.io/github/v/release/abhijeetk97/kmp-expect-actual-tracker?label=latest)](https://github.com/abhijeetk97/kmp-expect-actual-tracker/releases)
 [![License](https://img.shields.io/github/license/abhijeetk97/kmp-expect-actual-tracker)](LICENSE)
 
@@ -37,13 +39,15 @@ This plugin fills that gap. It scans your project, pairs every `expect` with its
 
 ## Installation
 
-### From the JetBrains Marketplace *(coming soon)*
+### From the JetBrains Marketplace
 
 1. Open **Settings → Plugins → Marketplace**
 2. Search for **KMP Expect/Actual Tracker**
 3. Click **Install** and restart the IDE
 
-### Install from disk (current builds)
+Or install directly from the [JetBrains Marketplace page](https://plugins.jetbrains.com/plugin/32220-kmp-expect-actual-tracker).
+
+### Install from disk
 
 1. Download the latest `.zip` from the [Releases](https://github.com/abhijeetk97/kmp-expect-actual-tracker/releases) page
 2. Open **Settings → Plugins → ⚙ → Install Plugin from Disk…**
