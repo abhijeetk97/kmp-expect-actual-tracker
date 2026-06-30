@@ -15,7 +15,9 @@ import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.psi.NavigatablePsiElement
 import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.JBColor
+import com.intellij.ui.SearchTextField
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLoadingPanel
 import com.intellij.ui.components.JBScrollPane
@@ -27,6 +29,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.JPanel
 import javax.swing.JTree
+import javax.swing.event.DocumentEvent
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 
@@ -160,6 +163,9 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // ─────────────────────────────────────────────────────────────────────────
         var coverageList: List<Coverage> = emptyList()
         var showIncompleteOnly = false
+        // The current search text. Empty means "no filter" — show everything.
+        // Captured by applyToTree() below and updated by the search field's listener.
+        var searchQuery = ""
 
         // ─────────────────────────────────────────────────────────────────────────
         // 4. applyToTree() — rebuild the tree from coverageList + filter state
@@ -167,17 +173,23 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // Only called when the project IS KMP (ProjectState.KMP). The non-KMP and
         // Gradle-sync states are handled directly in refresh() before reaching here.
         fun applyToTree() {
-            val toShow = if (showIncompleteOnly) {
-                coverageList.filter { !it.isComplete }
-            } else {
-                coverageList
-            }
+            // Both filters compose: first the "incomplete only" toggle, then the
+            // search text. Search is a case-insensitive substring match against the
+            // expect's display name, its fully-qualified name (so package fragments
+            // match too), and its platform labels (Android, iOS, JVM, …).
+            val query = searchQuery.trim()
+            val toShow = coverageList
+                .asSequence()
+                .filter { !showIncompleteOnly || !it.isComplete }
+                .filter { query.isEmpty() || it.matchesQuery(query) }
+                .toList()
 
             root.removeAllChildren()
             root.userObject = when {
-                coverageList.isEmpty() -> "No expect declarations found in this project"
-                toShow.isEmpty()       -> "All expects are fully covered 🎉"
-                else                   -> "Expect declarations"
+                coverageList.isEmpty()        -> "No expect declarations found in this project"
+                toShow.isEmpty() && query.isNotEmpty() -> "No expect declarations match \"$query\""
+                toShow.isEmpty()              -> "All expects are fully covered 🎉"
+                else                          -> "Expect declarations"
             }
 
             toShow.sortedBy { it.expect.fqName.asString() }.forEach { coverage ->
@@ -387,15 +399,41 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         toolbar.targetComponent = tree
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 9. PANEL ASSEMBLY
+        // 9. SEARCH FIELD
         // ─────────────────────────────────────────────────────────────────────────
-        val panel = JPanel(BorderLayout()).apply {
+        // SearchTextField is IntelliJ's themed search box — it ships with the magnifier
+        // icon, a clear (×) button, and search history out of the box. We listen for any
+        // document change and re-run applyToTree() so filtering is live as the user types.
+        //
+        // The listener only touches in-memory state (searchQuery) and rebuilds the tree
+        // from the already-cached coverageList — no scan, no PSI, so it's cheap to run on
+        // every keystroke directly on the EDT.
+        val searchField = SearchTextField().apply {
+            textEditor.emptyText.text = "Search expect declarations by name"
+            addDocumentListener(object : DocumentAdapter() {
+                override fun textChanged(e: DocumentEvent) {
+                    searchQuery = text
+                    applyToTree()
+                }
+            })
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // 10. PANEL ASSEMBLY
+        // ─────────────────────────────────────────────────────────────────────────
+        // The NORTH region stacks the action toolbar above the search field so both are
+        // always visible regardless of the tool window's width.
+        val northPanel = JPanel(BorderLayout()).apply {
             add(toolbar.component, BorderLayout.NORTH)
+            add(searchField, BorderLayout.SOUTH)
+        }
+        val panel = JPanel(BorderLayout()).apply {
+            add(northPanel, BorderLayout.NORTH)
             add(loadingPanel, BorderLayout.CENTER)  // loadingPanel wraps the scroll+tree
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 10. INITIAL SCAN
+        // 11. INITIAL SCAN
         // ─────────────────────────────────────────────────────────────────────────
         // DumbService.runWhenSmart defers the scan until indexing is complete.
         // The spinner (startLoading above) stays visible during this wait, so the
@@ -403,10 +441,27 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         DumbService.getInstance(project).runWhenSmart { refresh() }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // 11. ADD TO TOOL WINDOW
+        // 12. ADD TO TOOL WINDOW
         // ─────────────────────────────────────────────────────────────────────────
         toolWindow.contentManager.addContent(
             toolWindow.contentManager.factory.createContent(panel, null, false),
         )
+    }
+
+    /**
+     * Case-insensitive substring match used by the tool window's search field.
+     *
+     * Matches when [query] appears in any of:
+     *   - the expect's display name        (e.g. "platformName()")
+     *   - its fully-qualified name         (so package fragments match too)
+     *   - any of its platform labels       (e.g. "Android", "iOS", "JVM")
+     *
+     * [query] is assumed already trimmed and non-empty (callers guard for that).
+     */
+    private fun Coverage.matchesQuery(query: String): Boolean {
+        val needle = query.lowercase()
+        if (expect.displayName.lowercase().contains(needle)) return true
+        if (expect.fqName.asString().lowercase().contains(needle)) return true
+        return knownPlatforms.any { it.lowercase().contains(needle) }
     }
 }
