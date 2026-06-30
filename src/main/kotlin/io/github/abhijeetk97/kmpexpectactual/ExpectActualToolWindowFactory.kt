@@ -13,6 +13,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.psi.NavigatablePsiElement
+import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiTreeChangeAdapter
+import com.intellij.psi.PsiTreeChangeEvent
 import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.DocumentAdapter
@@ -22,7 +25,9 @@ import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLoadingPanel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.Tree
+import com.intellij.util.Alarm
 import com.intellij.util.concurrency.AppExecutorUtil
+import org.jetbrains.kotlin.psi.KtFile
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.event.MouseAdapter
@@ -443,8 +448,59 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         // ─────────────────────────────────────────────────────────────────────────
         // 12. ADD TO TOOL WINDOW
         // ─────────────────────────────────────────────────────────────────────────
-        toolWindow.contentManager.addContent(
-            toolWindow.contentManager.factory.createContent(panel, null, false),
+        // Create the Content up front so it can serve as the parent Disposable for the
+        // auto-refresh machinery below. When the tool window content is removed (project
+        // close, plugin unload), the platform disposes the Content, which in turn disposes
+        // the Alarm and unregisters the PSI listener — no manual cleanup, no leaks.
+        val content = toolWindow.contentManager.factory.createContent(panel, null, false)
+        toolWindow.contentManager.addContent(content)
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // 13. AUTO-REFRESH ON PSI EDITS (debounced)
+        // ─────────────────────────────────────────────────────────────────────────
+        // Without this, the tree shows stale coverage until the user clicks Refresh.
+        // We listen for PSI (parsed-code) changes and re-scan automatically.
+        //
+        // WHY DEBOUNCE
+        // ------------
+        // PSI change events fire on essentially every keystroke. Re-scanning the whole
+        // project on each one would mean constant background work and flickering,
+        // half-updated trees. Instead we coalesce: every change cancels the previously
+        // scheduled refresh and re-schedules one AUTO_REFRESH_DELAY_MS later. A burst of
+        // edits therefore collapses into a single scan once typing pauses.
+        //
+        // Alarm is IntelliJ's debouncing scheduler. SWING_THREAD makes its requests run
+        // on the EDT, which is required because refresh() touches Swing components. The
+        // `content` parent Disposable ties the Alarm's lifetime to this tool window.
+        val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, content)
+
+        fun scheduleAutoRefresh() {
+            // Drop the cached coverage now so the (debounced) re-scan recomputes it.
+            CoverageService.getInstance(project).invalidate()
+            // Collapse rapid edits: cancel any pending refresh and queue a fresh one.
+            refreshAlarm.cancelAllRequests()
+            refreshAlarm.addRequest({ refresh() }, AUTO_REFRESH_DELAY_MS)
+        }
+
+        // PsiTreeChangeAdapter gives empty defaults for every event; we override the ones
+        // that signal a real edit. We ignore changes to non-Kotlin files (e.g. editing a
+        // README) to avoid pointless project scans — but treat a null file as relevant,
+        // since file add/remove events surface that way and can introduce new declarations.
+        PsiManager.getInstance(project).addPsiTreeChangeListener(
+            object : PsiTreeChangeAdapter() {
+                private fun onChange(event: PsiTreeChangeEvent) {
+                    val file = event.file
+                    if (file == null || file is KtFile) scheduleAutoRefresh()
+                }
+
+                override fun childAdded(event: PsiTreeChangeEvent) = onChange(event)
+                override fun childRemoved(event: PsiTreeChangeEvent) = onChange(event)
+                override fun childReplaced(event: PsiTreeChangeEvent) = onChange(event)
+                override fun childMoved(event: PsiTreeChangeEvent) = onChange(event)
+                override fun childrenChanged(event: PsiTreeChangeEvent) = onChange(event)
+                override fun propertyChanged(event: PsiTreeChangeEvent) = onChange(event)
+            },
+            content,
         )
     }
 
@@ -463,5 +519,12 @@ class ExpectActualToolWindowFactory : ToolWindowFactory {
         if (expect.displayName.lowercase().contains(needle)) return true
         if (expect.fqName.asString().lowercase().contains(needle)) return true
         return knownPlatforms.any { it.lowercase().contains(needle) }
+    }
+
+    companion object {
+        // Debounce window for auto-refresh: a burst of edits within this interval
+        // collapses into a single re-scan once the user pauses. ~500 ms is short enough
+        // to feel instant but long enough to coalesce continuous typing.
+        private const val AUTO_REFRESH_DELAY_MS = 500
     }
 }
