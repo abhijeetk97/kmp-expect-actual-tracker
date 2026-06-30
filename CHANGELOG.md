@@ -9,7 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-06-30
+
 ### Added
+
+- **Search by name** — a live filter box in the tool window that narrows the coverage tree as you type. Matches case-insensitively against the expect's display name, fully-qualified name, and platform labels, and composes with the incomplete-only filter.
+- **Auto-refresh on edits** — the tool window now re-scans automatically when you add, edit, or delete declarations, instead of requiring a manual Refresh. A `PsiTreeChangeListener` invalidates the cache and a 500 ms `Alarm` debounce coalesces rapid edits (e.g. continuous typing) into a single re-scan.
 - Custom SVG plugin icon (`pluginIcon.svg` / `pluginIcon_dark.svg`) shown in the Plugin Manager and Marketplace
 - Custom tool window strip icon (`toolWindowExpectActual.svg`) replacing the generic structure icon
 

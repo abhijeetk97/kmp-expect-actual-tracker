@@ -30,7 +30,9 @@ This plugin fills that gap. It scans your project, pairs every `expect` with its
 
 - **Coverage tree** — every `expect` declaration listed as a parent node; each platform as a child with ✓ (covered) or ✗ missing (red)
 - **Coverage badge** — `[2/3 platforms]` count shown inline next to each expect
+- **Search by name** — live filter box that narrows the tree as you type; matches the expect's name, fully-qualified name, and platform labels
 - **Incomplete-only filter** — hide fully-covered expects with one click; no re-scan triggered
+- **Auto-refresh** — the tree updates automatically as you add, edit, or delete declarations; rapid edits are debounced into a single re-scan
 - **Double-click navigation** — jump to the `expect` or directly to an `actual` on any platform
 - **Smart loading states** — animated spinner during scan; actionable messages for non-KMP projects and unsynced Gradle projects
 - **Generated-file exclusion** — Compose Multiplatform resource accessors and other code-gen output are filtered out automatically
@@ -67,9 +69,10 @@ Or install directly from the [JetBrains Marketplace page](https://plugins.jetbra
 
 1. Open a Kotlin Multiplatform project and ensure **Gradle sync** has completed
 2. Open the **Expect/Actual** tool window (right sidebar, or **View → Tool Windows → Expect/Actual**)
-3. The tree populates automatically once indexing finishes
-4. Use the **↺ Refresh** button to re-scan after adding new declarations
+3. The tree populates automatically once indexing finishes, and updates automatically as you edit your code
+4. Use the **search box** to filter declarations by name
 5. Use the **⊟ Filter** button to show only incomplete expects
+6. Use the **↺ Refresh** button to force an immediate re-scan
 
 ---
 
@@ -119,8 +122,7 @@ Tree (Coverage + PlatformNode rows)
 | Issue | Feature |
 |-------|---------|
 | [#5](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/5) | `MissingActualInspection` — inline editor warnings |
-| [#6](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/6) | Auto-refresh on PSI edits (debounced) |
-| [#8](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/8) | Persist settings (ignored declarations, custom platform labels) |
+| [#8](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/8) | Unit tests for scanner and coverage model; wire CI |
 | [#11](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/11) | Export coverage report as HTML/CSV |
 | [#14](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/14) | Kotlin Analysis API for precise overload handling |
 
