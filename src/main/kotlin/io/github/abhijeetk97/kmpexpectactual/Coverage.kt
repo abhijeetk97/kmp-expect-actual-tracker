@@ -73,4 +73,21 @@ data class Coverage(
     // e.g. "2/3 platforms" — used as a badge label in the tree node.
     val coverageSummary: String
         get() = "${actualsByPlatform.size}/${knownPlatforms.size} platforms"
+
+    /**
+     * Case-insensitive substring match used by the tool window's search field.
+     *
+     * Matches when [query] appears in any of:
+     *   - the expect's display name        (e.g. "platformName()")
+     *   - its fully-qualified name         (so package fragments match too)
+     *   - any of its platform labels       (e.g. "Android", "iOS", "JVM")
+     *
+     * [query] is assumed already trimmed and non-empty (callers guard for that).
+     */
+    fun matchesQuery(query: String): Boolean {
+        val needle = query.lowercase()
+        if (expect.displayName.lowercase().contains(needle)) return true
+        if (expect.fqName.asString().lowercase().contains(needle)) return true
+        return knownPlatforms.any { it.lowercase().contains(needle) }
+    }
 }
