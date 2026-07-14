@@ -47,4 +47,10 @@ data class ExpectEntry(
     // Rule: always dereference (.element) inside a ReadAction. Never store .element
     // directly into a field — that's how you get "read access" crashes.
     val pointer: SmartPsiElementPointer<*>,
+
+    // The Gradle/IntelliJ module the expect lives in, with the source-set suffix
+    // stripped: "MyApp.core.analytics.commonMain" → "MyApp.core.analytics".
+    // Null when the module can't be resolved. Used by the "group by module" view
+    // and the per-module statistics breakdown.
+    val module: String? = null,
 )

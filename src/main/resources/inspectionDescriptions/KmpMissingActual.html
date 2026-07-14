@@ -1,0 +1,22 @@
+<html>
+<body>
+Reports <code>expect</code> declarations that are missing an <code>actual</code> implementation
+on one or more of the project's platforms.
+<p>
+The Kotlin compiler only verifies expect/actual pairing for the target you are currently
+building. This inspection checks <b>all</b> platforms observed in the project at once, using
+the same project-wide scan as the Expect/Actual tool window.
+</p>
+<p>
+The quick fix generates an <code>actual</code> stub for the missing platform: it places a
+TODO-bodied declaration in the platform's source set, in the same package and file name as
+the <code>expect</code>.
+</p>
+<!-- tooltip end -->
+<p>
+Platforms are detected from source-set directory names (e.g. <code>androidMain</code>,
+<code>iosMain</code>) with a module-name fallback. The set of "known platforms" is the union
+of every platform that has at least one <code>actual</code> anywhere in the project.
+</p>
+</body>
+</html>

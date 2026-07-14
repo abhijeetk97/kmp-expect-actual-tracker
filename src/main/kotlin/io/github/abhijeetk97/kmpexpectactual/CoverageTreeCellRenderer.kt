@@ -14,6 +14,7 @@ import javax.swing.tree.DefaultMutableTreeNode
  * Keep it fast: no PSI access, no IO, just append() calls.
  *
  * Row types (dispatched on the node's userObject):
+ *   GroupNode    → grouping row: "com.example.util  (5/7 covered)" (bold)
  *   Coverage     → parent row: "[kind] name  package  [2/3 platforms]"
  *   PlatformNode → child row:  "Android  ✓"  or  "JVM  ✗ missing"
  *   anything else → root / placeholder strings (empty-state messages)
@@ -38,6 +39,12 @@ class CoverageTreeCellRenderer : ColoredTreeCellRenderer() {
         val node = value as? DefaultMutableTreeNode ?: return
 
         when (val obj = node.userObject) {
+
+            // ── GROUPING ROW: package / module / missing-platform bucket ──
+            is GroupNode -> {
+                append(obj.label, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                append("  (${obj.badge})", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            }
 
             // ── PARENT ROW: one expect declaration ──────────────────────
             is Coverage -> {

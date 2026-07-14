@@ -28,13 +28,31 @@ This plugin fills that gap. It scans your project, pairs every `expect` with its
 
 ## Features
 
+### Tool window
+
 - **Coverage tree** — every `expect` declaration listed as a parent node; each platform as a child with ✓ (covered) or ✗ missing (red)
 - **Coverage badge** — `[2/3 platforms]` count shown inline next to each expect
+- **Statistics bar** — project-wide summary ("42 expects · 36 complete (86%) · 6 incomplete") with a per-platform breakdown tooltip
+- **Group-by modes** — group the tree by package, by module, or by missing platform; each group shows its own coverage badge
+- **Platform filter** — scope the whole view to a single platform; combined with the incomplete-only toggle it answers "what's missing on iOS?"
 - **Search by name** — live filter box that narrows the tree as you type; matches the expect's name, fully-qualified name, and platform labels
 - **Incomplete-only filter** — hide fully-covered expects with one click; no re-scan triggered
 - **Auto-refresh** — the tree updates automatically as you add, edit, or delete declarations; rapid edits are debounced into a single re-scan
-- **Double-click navigation** — jump to the `expect` or directly to an `actual` on any platform
+- **Navigation** — double-click or right-click → Jump to Source on the `expect` or any `actual`; Copy Qualified Name also in the context menu
+- **Export report** — save the coverage matrix as standalone HTML or CSV from the toolbar
+- **Persistent view state** — filters and grouping survive IDE restarts
 - **Smart loading states** — animated spinner during scan; actionable messages for non-KMP projects and unsynced Gradle projects
+
+### Editor integration
+
+- **Missing-actual inspection** — `expect` declarations with missing actuals are flagged with a warning right in the editor
+- **Generate 'actual' stub quick fix** — one intention per missing platform creates a TODO-bodied stub in that platform's source set, same package and file name as the expect
+- **Coverage gutter icons** — green/red line marker on every expect, navigating to its actual implementations
+- **Reveal in tracker** — editor context-menu action that selects the expect under the caret in the tool window
+
+### Configuration
+
+- **Settings page** (Settings → Tools → KMP Expect/Actual Tracker) — extra excluded path patterns, auto-refresh debounce, and a toggle for treating `src/main` as Android
 - **Generated-file exclusion** — Compose Multiplatform resource accessors and other code-gen output are filtered out automatically
 
 ---
@@ -121,10 +139,8 @@ Tree (Coverage + PlatformNode rows)
 
 | Issue | Feature |
 |-------|---------|
-| [#5](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/5) | `MissingActualInspection` — inline editor warnings |
-| [#8](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/8) | Unit tests for scanner and coverage model; wire CI |
-| [#11](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/11) | Export coverage report as HTML/CSV |
 | [#14](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/14) | Kotlin Analysis API for precise overload handling |
+| [#15](https://github.com/abhijeetk97/kmp-expect-actual-tracker/issues/15) | Source-set-aware expected platforms via dependency graph |
 
 ---
 
