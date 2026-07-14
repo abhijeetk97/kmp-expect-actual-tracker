@@ -186,11 +186,10 @@ object ExpectActualScanner {
 
         LOG.info("KMP Scanner: scanning ${ktFiles.size} Kotlin source files")
 
+        val settings = ExpectActualSettings.getInstance(project).state
+
         for (vf in ktFiles) {
-            // Skip files under any directory named "generated" — Compose Multiplatform and
-            // other code-gen tools produce `expect` declarations there (e.g. Res accessors)
-            // that are implementation details, not user-authored declarations.
-            if (vf.path.contains("/generated/")) continue
+            if (isExcluded(vf.path, settings)) continue
 
             // VirtualFile is the platform's filesystem abstraction. It doesn't give us
             // the parsed tree; we need PsiManager to convert it to a KtFile (the PSI).
@@ -238,12 +237,27 @@ object ExpectActualScanner {
             GlobalSearchScope.projectScope(project),
         )
 
+        val settings = ExpectActualSettings.getInstance(project).state
+
         for (vf in ktFiles) {
-            if (vf.path.contains("/generated/")) continue
+            if (isExcluded(vf.path, settings)) continue
             val ktFile = psiManager.findFile(vf) as? KtFile ?: continue
-            collectActuals(ktFile.declarations, pointerManager, result)
+            collectActuals(ktFile.declarations, pointerManager, result, settings.treatSrcMainAsAndroid)
         }
         return result
+    }
+
+    /**
+     * A file is excluded when its path contains any exclusion pattern. The
+     * `/generated/` rule is built in — Compose Multiplatform and other code-gen
+     * tools produce `expect` declarations there (e.g. Res accessors) that are
+     * implementation details, not user-authored declarations. Users can add
+     * their own patterns in Settings → Tools → KMP Expect/Actual Tracker.
+     */
+    internal fun isExcluded(path: String, settings: ExpectActualSettings.State): Boolean {
+        if ("/generated/" in path) return true
+        val lower = path.lowercase()
+        return settings.excludedPathPatterns.any { it.isNotBlank() && it.trim().lowercase() in lower }
     }
 
     /**
@@ -268,6 +282,7 @@ object ExpectActualScanner {
         declarations: List<KtDeclaration>,
         pointerManager: SmartPointerManager,
         out: MutableMap<FqName, MutableMap<String, SmartPsiElementPointer<*>>>,
+        srcMainIsAndroid: Boolean,
     ) {
         for (decl in declarations) {
             if (decl.hasModifier(KtTokens.ACTUAL_KEYWORD)) {
@@ -278,7 +293,7 @@ object ExpectActualScanner {
                 // Fall back to module-name heuristic if the path gives no match.
                 // Skip entirely if platform is still unknown — avoids polluting knownPlatforms.
                 val filePath = named.containingFile?.virtualFile?.path ?: ""
-                val platform = platformFromPath(filePath)
+                val platform = platformFromPath(filePath, srcMainIsAndroid)
                     ?: run {
                         val module = ModuleUtilCore.findModuleForPsiElement(decl) ?: return@run null
                         platformFromModule(module.name)
@@ -294,7 +309,7 @@ object ExpectActualScanner {
             // Recurse into classes just as we do for expects — actual members of an
             // actual class each need to be recorded too.
             if (decl is KtClassOrObject) {
-                collectActuals(decl.declarations, pointerManager, out)
+                collectActuals(decl.declarations, pointerManager, out, srcMainIsAndroid)
             }
         }
     }
@@ -317,7 +332,7 @@ object ExpectActualScanner {
      * Patterns are lowercased and checked as path segments (with slashes) to avoid
      * false matches on package/class names that happen to contain "ios" or "js".
      */
-    private fun platformFromPath(path: String): String? {
+    internal fun platformFromPath(path: String, srcMainIsAndroid: Boolean = true): String? {
         val lower = path.lowercase()
         return when {
             "/androidmain/" in lower                                          -> "Android"
@@ -339,8 +354,9 @@ object ExpectActualScanner {
             // AGP-style Android libraries use /src/main/ instead of /androidMain/.
             // This pattern is only reached when no KMP-standard source set matched above,
             // so the false-positive risk for pure-JVM projects is low; KMP actuals simply
-            // don't appear there.
-            "/src/main/" in lower                                              -> "Android"
+            // don't appear there. Can be disabled in settings for projects where
+            // src/main is plain JVM code.
+            srcMainIsAndroid && "/src/main/" in lower                          -> "Android"
             else                                                               -> null
         }
     }
@@ -360,7 +376,7 @@ object ExpectActualScanner {
      * Returns null for commonMain and any unrecognised suffix, so the entry is
      * dropped rather than stored under a meaningless label.
      */
-    private fun platformFromModule(moduleName: String): String? {
+    internal fun platformFromModule(moduleName: String): String? {
         // Extract just the source-set portion: "MyApp.core.analytics.androidMain" → "androidmain"
         val suffix = moduleName.lowercase().substringAfterLast('.')
         return when {
@@ -425,6 +441,8 @@ object ExpectActualScanner {
                     // SmartPointerManager.createSmartPsiElementPointer wraps the live PSI
                     // element in a stable handle. See ExpectEntry for why this matters.
                     pointer = pointerManager.createSmartPsiElementPointer(named),
+                    module = ModuleUtilCore.findModuleForPsiElement(named)
+                        ?.name?.let(::moduleDisplayName),
                 )
             }
 
@@ -433,6 +451,21 @@ object ExpectActualScanner {
             if (decl is KtClassOrObject) {
                 collectExpects(decl.declarations, pointerManager, out)
             }
+        }
+    }
+
+    /**
+     * Turns an IntelliJ module name into a human-facing module label by stripping
+     * the trailing source-set segment: "MyApp.core.analytics.commonMain" →
+     * "MyApp.core.analytics". Module names that don't end in a source-set-like
+     * segment are returned unchanged.
+     */
+    internal fun moduleDisplayName(moduleName: String): String {
+        val lastSegment = moduleName.substringAfterLast('.').lowercase()
+        return if (lastSegment.endsWith("main") || lastSegment.endsWith("test")) {
+            moduleName.substringBeforeLast('.', moduleName)
+        } else {
+            moduleName
         }
     }
 
