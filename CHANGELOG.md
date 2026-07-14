@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-07-14
+
 ### Added
 
 - **MissingActualInspection** — `expect` declarations missing an `actual` on one or more platforms are now flagged directly in the editor with a warning, using the same project-wide scan as the tool window. Toggle/severity under Settings → Editor → Inspections → Kotlin Multiplatform.
