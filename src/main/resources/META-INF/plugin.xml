@@ -7,14 +7,15 @@
     <description><![CDATA[
         A project-wide coverage dashboard for Kotlin Multiplatform expect/actual
         declarations. Lists every expect and shows which targets supply an actual,
-        flagging incomplete declarations.
+        flagging incomplete declarations. Includes an editor inspection with
+        actual-stub generation, coverage gutter icons, and HTML/CSV export.
     ]]></description>
 
     <!-- Required: platform + the Kotlin plugin -->
     <depends>com.intellij.modules.platform</depends>
     <depends>org.jetbrains.kotlin</depends>
 
-    <!-- Declare K2 compatibility. Our v1 uses only syntactic PSI, so it works in
+    <!-- Declare K2 compatibility. We use only syntactic PSI, so it works in
          both K1 and K2. Without this, the plugin won't load under K2 (default since 2025.3). -->
     <extensions defaultExtensionNs="org.jetbrains.kotlin">
         <supportsKotlinPluginMode supportsK1="true" supportsK2="true" />
@@ -26,6 +27,51 @@
             anchor="right"
             factoryClass="io.github.abhijeetk97.kmpexpectactual.ExpectActualToolWindowFactory"
             icon="/icons/toolWindowExpectActual.svg" />
+
+        <!-- Invalidates the coverage cache on any Kotlin PSI change, so the
+             inspection and line markers stay fresh even when the tool window
+             (which has its own listener) has never been opened. -->
+        <psi.treeChangeListener
+            implementation="io.github.abhijeetk97.kmpexpectactual.CoverageInvalidationListener" />
+
+        <!-- Editor warning on expect declarations missing one or more actuals,
+             with a quick fix that generates the missing stub (issues #5, #16). -->
+        <localInspection
+            language="kotlin"
+            shortName="KmpMissingActual"
+            displayName="Expect declaration without actual on all platforms"
+            groupName="Kotlin Multiplatform"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="io.github.abhijeetk97.kmpexpectactual.MissingActualInspection" />
+
+        <!-- Coverage-aware gutter icon on expect declarations. -->
+        <codeInsight.lineMarkerProvider
+            language="kotlin"
+            implementationClass="io.github.abhijeetk97.kmpexpectactual.ExpectCoverageLineMarkerProvider" />
+
+        <!-- Settings → Tools → KMP Expect/Actual Tracker -->
+        <projectConfigurable
+            parentId="tools"
+            instance="io.github.abhijeetk97.kmpexpectactual.ExpectActualSettingsConfigurable"
+            id="io.github.abhijeetk97.kmpexpectactual.settings"
+            displayName="KMP Expect/Actual Tracker"
+            nonDefaultProject="true" />
+
+        <!-- Balloon notifications for export results and stub generation. -->
+        <notificationGroup
+            id="KMP Expect/Actual Tracker"
+            displayType="BALLOON" />
     </extensions>
+
+    <actions>
+        <action
+            id="io.github.abhijeetk97.kmpexpectactual.RevealInTracker"
+            class="io.github.abhijeetk97.kmpexpectactual.RevealInTrackerAction"
+            text="Reveal in Expect/Actual Tracker"
+            description="Select this expect declaration in the Expect/Actual tool window">
+            <add-to-group group-id="EditorPopupMenu" anchor="last" />
+        </action>
+    </actions>
 
 </idea-plugin>
