@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **MissingActualInspection** — `expect` declarations missing an `actual` on one or more platforms are now flagged directly in the editor with a warning, using the same project-wide scan as the tool window. Toggle/severity under Settings → Editor → Inspections → Kotlin Multiplatform.
+- **Generate 'actual' stub quick fix** — the inspection offers a fix per missing platform that creates a TODO-bodied `actual` stub in the platform's source set, in the same package and file name as the `expect`. Handles functions, properties, classes/objects, interfaces, and enums.
+- **Coverage gutter icons** — `expect` declarations get a coverage-aware line marker (green = all platforms covered, red = something missing) that navigates to the actual implementations.
+- **Coverage statistics bar** — the tool window now shows a summary line ("42 expects · 36 complete (86%) · 6 incomplete") with a per-platform breakdown tooltip.
+- **Group-by modes** — group the coverage tree by package, by module, or by missing platform ("what do I need to write to ship the iOS target?"), with per-group coverage badges.
+- **Platform filter** — scope the whole tree to a single platform; combined with the incomplete-only toggle it shows exactly what's missing on that target.
+- **Export report** — save the coverage matrix as a standalone HTML page or CSV file from the tool window toolbar.
+- **Right-click context menu** — Jump to Source and Copy Qualified Name on tree rows.
+- **Reveal in Expect/Actual Tracker** — editor context-menu action that selects the expect under the caret in the tool window.
+- **Settings page** (Settings → Tools → KMP Expect/Actual Tracker) — custom excluded path patterns, auto-refresh debounce interval, and a toggle for treating `src/main` as Android.
+- **Persistent view state** — the incomplete-only toggle, group-by mode, and platform filter survive IDE restarts.
+- **Unit tests + CI** — tests for the coverage model, statistics, report generators, platform detection heuristics, scanner, and stub generator; the Build workflow now runs on pushes to `main` and on pull requests.
+
+### Changed
+
+- Coverage cache invalidation now happens project-wide on any Kotlin PSI change (not just while the tool window is open), keeping the inspection and gutter icons fresh.
+
 ---
 
 ## [0.2.0] - 2026-06-30
